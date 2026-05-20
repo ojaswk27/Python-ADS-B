@@ -143,6 +143,20 @@ _DIM     = "#336633"    # range labels / vector
 
 
 class App(tk.Tk):
+    """
+    Main application window.
+
+    Left panel  — 680×680 px PPI radar canvas.  Left-click empty space to place
+                  an aircraft; drag an existing blip to reposition it;
+                  right-click to delete.
+    Right panel — settings and track list.  The "Edit Selected" section lets you
+                  update altitude, speed, and heading of the selected aircraft.
+
+    A background TX thread sends ADS-B messages for every placed aircraft to
+    the configured UDP multicast group at ~12.5 messages/second.  Thread-to-UI
+    communication uses a plain string attribute (_tx_status) read by the main
+    draw loop, avoiding tkinter cross-thread calls.
+    """
 
     def __init__(self, group: str, port: int, iface: str,
                  centre_lat: float, centre_lon: float, range_nm: float) -> None:
@@ -174,6 +188,7 @@ class App(tk.Tk):
         self._drag_ac:  ClickAircraft | None = None
         self._lock = threading.Lock()
         self._tx_count = 0
+        self._tx_status = ""
 
         self._build_ui()
         threading.Thread(target=self._tx_loop, daemon=True).start()
@@ -463,10 +478,12 @@ class App(tk.Tk):
         with self._lock:
             for ac in self._aircraft:
                 ac.step(dt)
-            if self._selected:
-                self._refresh_editor()
+        if self._selected:
+            self._refresh_editor()
 
         self._draw()
+        if self._tx_status:
+            self._v_status.set(self._tx_status)
         self.after(60, self._loop)   # ~16 fps
 
     def _draw(self):
@@ -567,6 +584,13 @@ class App(tk.Tk):
     # ── Transmit thread ───────────────────────────────────────────────────────
 
     def _tx_loop(self):
+        """
+        Background thread: send one ADS-B message per aircraft per ~80 ms.
+
+        Status text is written to self._tx_status (a plain string); the main
+        thread reads it in _loop() and updates the label — no cross-thread
+        tkinter calls here.
+        """
         while True:
             with self._lock:
                 acs = list(self._aircraft)
@@ -582,9 +606,8 @@ class App(tk.Tk):
                 except OSError:
                     pass
                 time.sleep(0.08)   # 12.5 msgs/s total
-            self.after(0, self._v_status.set,
-                       f"{self.group}:{self.port}\n"
-                       f"{len(acs)} aircraft · {self._tx_count} msgs")
+            self._tx_status = (f"{self.group}:{self.port}\n"
+                               f"{len(acs)} aircraft · {self._tx_count} msgs")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

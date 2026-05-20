@@ -43,7 +43,13 @@ def _nl(lat: float) -> int:
 
 
 def _encode_cpr(lat: float, lon: float, odd: bool) -> tuple:
-    """Encode lat/lon to a 17-bit CPR (cpr_lat, cpr_lon) pair."""
+    """
+    Encode a WGS-84 position to a 17-bit CPR (cpr_lat, cpr_lon) pair.
+
+    The encoding uses the same zone-grid arithmetic as the decoder's cpr_resolve,
+    but in reverse: divide the lat/lon fractional offset within its zone by the
+    zone width and scale to 2^17.  odd=True selects the 59-zone (odd) grid.
+    """
     dlat = 360.0 / (4 * _NZ - (1 if odd else 0))
     rlat = lat % dlat
     if rlat < 0:
@@ -64,7 +70,13 @@ def _encode_cpr(lat: float, lon: float, odd: bool) -> tuple:
 # ─── Altitude encoding (Q=1, 25-ft linear) ────────────────────────────────────
 
 def _encode_altitude(alt_ft: int) -> int:
-    """Return 12-bit AC field for the given altitude using Q=1 (25-ft steps)."""
+    """
+    Return the 12-bit AC field for the given altitude.
+
+    Uses the Q=1 (25-ft linear) encoding: the 13-bit altcode has M=0 at bit 6
+    and Q=1 at bit 4; the AC field is the 12-bit result after stripping M.
+    Valid range: −1 000 ft to roughly 50 000 ft.
+    """
     n = max(0, (alt_ft + 1000) // 25)
     # Build 13-bit altcode with M=0 at bit 6 and Q=1 at bit 4
     altcode = ((n >> 5) << 7) | (((n >> 4) & 1) << 5) | (1 << 4) | (n & 0xF)
@@ -172,7 +184,7 @@ class SimAircraft:
     KT_PER_DEG_LAT = 60.0          # 1° lat ≈ 60 nm
 
     def step(self, dt: float) -> None:
-        """Advance position by dt seconds."""
+        """Advance position, altitude, and heading by dt seconds."""
         hdg = math.radians(self.heading_deg)
         nm  = self.speed_kt * dt / 3600.0   # nautical miles
         self.lat += nm * math.cos(hdg) / self.KT_PER_DEG_LAT

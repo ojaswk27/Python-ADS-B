@@ -716,30 +716,61 @@ def run_live(host: str, port: int, fleet: dict) -> None:
                         _print_result(res)
 
 
-def run_multicast(group: str, port: int, iface: str, fleet: dict) -> None:
-    """Join a UDP multicast group and decode ADS-B messages in real time."""
-    print(_BANNER)
-    print(f"  Joining multicast {group}:{port}  iface={iface}\n" + _SEP)
+def _print_fleet_table(fleet: dict, source: str) -> None:
+    """Clear the terminal and print a tidy coordinate table for all tracked aircraft."""
+    now = datetime.now(timezone.utc)
+    print("\033[2J\033[H", end="")
+    hdr = f"{'ICAO':<8}{'Callsign':<10}{'Latitude':>12}{'Longitude':>13}{'Alt ft':>9}{'Spd kt':>8}{'Track°':>8}{'Seen':>8}"
+    print(hdr)
+    print("─" * len(hdr))
+    stale_cutoff = 30
+    shown = 0
+    for ac in sorted(fleet.values(), key=lambda a: a.icao):
+        age = (now - ac.last_seen).total_seconds() if ac.last_seen else 9999
+        if age > stale_cutoff:
+            continue
+        lat = f"{ac.lat:+.5f}°"   if ac.lat      is not None else "—"
+        lon = f"{ac.lon:+.5f}°"   if ac.lon      is not None else "—"
+        alt = f"{ac.altitude:,}"  if ac.altitude  is not None else "—"
+        spd = str(ac.speed)       if ac.speed     is not None else "—"
+        trk = (f"{ac.track:.1f}"   if ac.track    is not None else
+               f"{ac.heading:.1f}" if ac.heading  is not None else "—")
+        cs  = ac.callsign or "—"
+        print(f"{ac.icao:<8}{cs:<10}{lat:>12}{lon:>13}{alt:>9}{spd:>8}{trk:>8}{age:>7.0f}s")
+        shown += 1
+    if shown == 0:
+        print("  (no aircraft — waiting for messages)")
+    print(f"\n  {_ts()} UTC   {source}   {len(fleet)} tracked")
 
+
+def run_multicast(group: str, port: int, iface: str, fleet: dict) -> None:
+    """Join a UDP multicast group and print a live coordinate table."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("", port))
 
     mreq = struct.pack("4s4s", socket.inet_aton(group), socket.inet_aton(iface))
     sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+    sock.settimeout(1.0)
 
     buf = ""
+    last_print = 0.0
     try:
         while True:
-            data, _ = sock.recvfrom(4096)
-            buf += data.decode("ascii", errors="ignore")
+            try:
+                data, _ = sock.recvfrom(4096)
+                buf += data.decode("ascii", errors="ignore")
+            except socket.timeout:
+                pass
             while "\n" in buf:
                 line, buf = buf.split("\n", 1)
                 line = line.strip()
                 if line:
-                    res = decode_message(line, fleet)
-                    if res.get("valid"):
-                        _print_result(res)
+                    decode_message(line, fleet)
+            now = time.monotonic()
+            if now - last_print >= 1.0:
+                _print_fleet_table(fleet, f"{group}:{port}")
+                last_print = now
     finally:
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_DROP_MEMBERSHIP, mreq)
         sock.close()

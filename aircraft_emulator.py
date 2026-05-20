@@ -21,7 +21,7 @@ import struct
 import time
 from dataclasses import dataclass, field
 
-from pyModeS import crc as _pymodes_crc
+from pyModeS.message import crc_remainder as _crc_remainder
 
 
 # ─── CPR helpers ─────────────────────────────────────────────────────────────
@@ -87,7 +87,7 @@ def _char_idx(c: str) -> int:
 def _sign_crc(payload_hex: str) -> str:
     """Given an 11-byte (22-char) hex payload, return the full 14-byte message."""
     msg0 = payload_hex + "000000"
-    crc_val = _pymodes_crc(msg0)
+    crc_val = _crc_remainder(int(msg0, 16), 112)
     return payload_hex + f"{crc_val:06X}"
 
 

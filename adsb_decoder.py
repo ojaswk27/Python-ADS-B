@@ -42,8 +42,7 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
-from pyModeS import crc as _pymodes_crc     # table-driven CRC-24, ~4.5x faster
-                                            # than a hand-rolled shift register
+from pyModeS.message import crc_remainder as _crc_remainder  # table-driven CRC-24
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -85,7 +84,7 @@ def me_payload(msg: str) -> int:
 
 def crc_valid(msg: str) -> bool:
     """Return True if the 112-bit message passes the Mode S CRC-24 check."""
-    return _pymodes_crc(msg) == 0
+    return _crc_remainder(int(msg, 16), 112) == 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

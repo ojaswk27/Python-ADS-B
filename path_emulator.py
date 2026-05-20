@@ -377,11 +377,20 @@ class App(tk.Tk):
                  font=("Courier", 7), justify=tk.LEFT, anchor="w"
                  ).pack(fill=tk.X, padx=4, pady=4)
 
+        # Hint
+        hint = ("L-click canvas → add waypoint\n"
+                "Drag dot       → move waypoint\n"
+                "R-click dot    → delete waypoint\n"
+                "Need 2+ wps to move")
+        tk.Label(pf, text=hint, bg=_PANEL_BG, fg="#224422",
+                 font=("Courier", 7), justify=tk.LEFT, anchor="w"
+                 ).pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=(0, 2))
+
         # Cursor lat/lon
         self._v_cursor = tk.StringVar()
         tk.Label(pf, textvariable=self._v_cursor, bg=_PANEL_BG, fg="#336633",
                  font=("Courier", 7), justify=tk.LEFT, anchor="w"
-                 ).pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6)
+                 ).pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=4)
 
     # ── Mouse events ──────────────────────────────────────────────────────────
 
@@ -393,7 +402,9 @@ class App(tk.Tk):
             self._drag_wp = (ac, idx)
         else:
             ll = self._to_ll(ev.x, ev.y)
-            if ll and self._selected:
+            if ll:
+                if self._selected is None:
+                    self._new_aircraft()   # auto-create on first canvas click
                 with self._lock:
                     self._selected.waypoints.append(ll)
                 self._list_dirty = True

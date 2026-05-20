@@ -42,6 +42,8 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
+import net_config
+
 from pyModeS.message import crc_remainder as _crc_remainder  # table-driven CRC-24
 
 
@@ -781,6 +783,7 @@ def run_multicast(group: str, port: int, iface: str, fleet: dict) -> None:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def main() -> None:
+    _cfg = net_config.load()
     parser = argparse.ArgumentParser(
         description="ADS-B decoder — pure Python stdlib",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -792,15 +795,15 @@ def main() -> None:
     g.add_argument("--live", action="store_true",
                    help="Live decode from dump1090 TCP stream")
     g.add_argument("--multicast", action="store_true",
-                   help="Live decode from UDP multicast stream (default port 30003)")
+                   help="Live decode from UDP multicast stream")
     parser.add_argument("--host",  default="127.0.0.1",
                         help="TCP host for --live (default: 127.0.0.1)")
     parser.add_argument("--port",  type=int, default=None,
-                        help="Port: 30002 for --live, 30003 for --multicast")
-    parser.add_argument("--group", default="239.255.0.1",
-                        help="Multicast group address (default: 239.255.0.1)")
-    parser.add_argument("--iface", default="127.0.0.1",
-                        help="Local interface for multicast (default: 127.0.0.1)")
+                        help="Port override (defaults to network.cfg value for --multicast, 30002 for --live)")
+    parser.add_argument("--group", default=_cfg["group"],
+                        help=f"Multicast group address (default: {_cfg['group']})")
+    parser.add_argument("--iface", default=_cfg["iface"],
+                        help=f"Local interface for multicast (default: {_cfg['iface']})")
     args = parser.parse_args()
 
     fleet: dict = {}
@@ -811,7 +814,7 @@ def main() -> None:
     elif args.live:
         run_live(args.host, args.port if args.port is not None else 30002, fleet)
     elif args.multicast:
-        run_multicast(args.group, args.port if args.port is not None else 30003,
+        run_multicast(args.group, args.port if args.port is not None else _cfg["port"],
                       args.iface, fleet)
     else:
         run_demo(fleet)

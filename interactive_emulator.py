@@ -29,6 +29,7 @@ import time
 import tkinter as tk
 
 from aircraft_emulator import build_identification, build_position, build_velocity
+import net_config
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -620,9 +621,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("--group",  default="239.255.0.1")
-    parser.add_argument("--port",   type=int, default=30003)
-    parser.add_argument("--iface",  default="127.0.0.1")
+    _cfg = net_config.load()
+    parser.add_argument("--group",  default=_cfg["group"])
+    parser.add_argument("--port",   type=int, default=_cfg["port"])
+    parser.add_argument("--iface",  default=_cfg["iface"])
     parser.add_argument("--centre", metavar="LAT,LON", default=None,
                         help="Radar centre, e.g. 51.5,-0.5")
     parser.add_argument("--range",  type=float, default=200.0,

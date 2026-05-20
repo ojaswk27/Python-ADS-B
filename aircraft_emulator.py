@@ -22,6 +22,7 @@ import time
 from dataclasses import dataclass, field
 
 from pyModeS.message import crc_remainder as _crc_remainder
+import net_config
 
 
 # ─── CPR helpers ─────────────────────────────────────────────────────────────
@@ -290,17 +291,18 @@ def run_emulator(aircraft: list, group: str, port: int,
 # ─── Entry point ─────────────────────────────────────────────────────────────
 
 def main() -> None:
+    _cfg = net_config.load()
     parser = argparse.ArgumentParser(
         description="ADS-B aircraft emulator — sends messages over UDP multicast",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("--group",  default="239.255.0.1",
-                        help="Multicast group (default: 239.255.0.1)")
-    parser.add_argument("--port",   type=int, default=30003,
-                        help="UDP port (default: 30003)")
-    parser.add_argument("--iface",  default="127.0.0.1",
-                        help="Local interface (default: 127.0.0.1)")
+    parser.add_argument("--group",  default=_cfg["group"],
+                        help=f"Multicast group (default: {_cfg['group']})")
+    parser.add_argument("--port",   type=int, default=_cfg["port"],
+                        help=f"UDP port (default: {_cfg['port']})")
+    parser.add_argument("--iface",  default=_cfg["iface"],
+                        help=f"Local interface (default: {_cfg['iface']})")
     parser.add_argument("--count",  type=int, default=3,
                         help="Number of aircraft to simulate, 1–4 (default: 3)")
     parser.add_argument("--rate",   type=float, default=2.0,

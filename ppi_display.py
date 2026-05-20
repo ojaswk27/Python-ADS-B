@@ -558,8 +558,8 @@ def main() -> None:
                         help="Multicast group (default: 239.255.0.1)")
     parser.add_argument("--port",    type=int, default=30003,
                         help="UDP port (default: 30003)")
-    parser.add_argument("--iface",   default="0.0.0.0",
-                        help="Local interface (default: 0.0.0.0)")
+    parser.add_argument("--iface",   default="127.0.0.1",
+                        help="Local interface (default: 127.0.0.1)")
     parser.add_argument("--centre",  metavar="LAT,LON",
                         help="Fixed radar centre, e.g. 52.0,4.0")
     parser.add_argument("--range",   type=float, default=300.0,

@@ -52,13 +52,12 @@ class App(tk.Tk):
         self.resizable(False, False)
 
         self.c_lat, self.c_lon, self.rng = c_lat, c_lon, rng
-        self.sweep = 0.0
         self._tick = time.monotonic()
 
-        self._fleet:   dict[str, Aircraft] = {}
-        self._history: dict[str, deque]    = {}
-        self._illum:   dict[str, float]    = {}
-        self._lock     = threading.Lock()
+        self._fleet:    dict[str, Aircraft] = {}
+        self._history:  dict[str, deque]   = {}
+        self._last_rx:  dict[str, float]   = {}   # monotonic time of last message
+        self._lock      = threading.Lock()
         self._rx_status = "joining…"
 
         self._build_ui()
@@ -127,35 +126,32 @@ class App(tk.Tk):
     # ── main loop ─────────────────────────────────────────────────────────────
 
     def _loop(self):
-        now = time.monotonic()
-        dt  = now - self._tick
+        now        = time.monotonic()
         self._tick = now
-        self.sweep = (self.sweep + ui.SWEEP_SPD * dt) % 360.0
 
         with self._lock:
-            for icao in list(self._illum):
-                self._illum[icao] += dt
+            # Remove aircraft silent for >60 s
+            gone = [icao for icao, t in self._last_rx.items()
+                    if now - t > 60.0]
+            for icao in gone:
+                self._fleet.pop(icao, None)
+                self._history.pop(icao, None)
+                self._last_rx.pop(icao, None)
 
             for icao, ac in self._fleet.items():
                 if ac.lat is None:
                     continue
                 if icao not in self._history:
                     self._history[icao] = deque(maxlen=8)
-                    self._illum[icao]   = 999.0
                 hist = self._history[icao]
                 if not hist or math.hypot(ac.lat - hist[-1][0],
                                           ac.lon - hist[-1][1]) > 1e-4:
                     hist.append((ac.lat, ac.lon))
-                nm_e = ((ac.lon - self.c_lon) * 60.0
-                        * math.cos(math.radians(self.c_lat)))
-                nm_n = (ac.lat - self.c_lat) * 60.0
-                brng = math.degrees(math.atan2(nm_e, nm_n)) % 360.0
-                if (self.sweep - brng) % 360.0 <= ui.SWEEP_SPD * dt + 2.0:
-                    self._illum[icao] = 0.0
 
             fleet   = dict(self._fleet)
             history = {k: list(v) for k, v in self._history.items()}
-            illum   = dict(self._illum)
+            # illum = seconds since last message received (matches display thresholds)
+            illum   = {icao: now - t for icao, t in self._last_rx.items()}
 
         self._draw(fleet, history, illum)
         self._update_panel(fleet, illum)
@@ -168,8 +164,7 @@ class App(tk.Tk):
         cv = self.cv
         cv.delete("all")
         cx, cy, r = ui.geom()
-        ui.draw_radar_frame(cv, cx, cy, r, self.rng, self.sweep,
-                            self.c_lat, self.c_lon)
+        ui.draw_radar_frame(cv, cx, cy, r, self.rng, self.c_lat, self.c_lon)
 
         td = ui.TRAIL_DOT
         for icao, pts in history.items():
@@ -250,6 +245,9 @@ class App(tk.Tk):
                     if line:
                         with self._lock:
                             decode_message(line, self._fleet)
+                            # ICAO is hex chars 3-8 of a DF17 raw frame (*8DICAO...)
+                            if len(line) >= 9:
+                                self._last_rx[line[3:9].upper()] = time.monotonic()
                         n += 1
                 self._rx_status = f"{group}:{port}  {n} msgs"
         finally:

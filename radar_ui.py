@@ -19,8 +19,6 @@ BG      = "#000000"
 RADAR   = "#050505"
 RING_D  = "#1c1c1c"
 RING_B  = "#444444"
-SWEEP   = "#ffffff"
-SWEEP_T = "#1a1a1a"
 DIM     = "#444444"
 PANEL   = "#0c0c0c"
 FG      = "#cccccc"
@@ -34,7 +32,6 @@ BTN_ACT = "#2a2a2a"
 
 CANVAS_SZ  = 680 * SCALE    # canvas width/height in pixels
 PANEL_W    = 200 * SCALE    # side-panel width in pixels
-SWEEP_SPD  = 36.0           # degrees/second — not a pixel value
 
 HIT_WP    = 10 * SCALE      # waypoint click-hit radius
 BLIP_SZ   = 8  * SCALE      # aircraft triangle half-size
@@ -115,10 +112,10 @@ def make_panel(root):
 
 # ── Radar canvas drawing ──────────────────────────────────────────────────────
 
-def draw_radar_frame(cv, cx, cy, r, rng, sweep, c_lat, c_lon):
+def draw_radar_frame(cv, cx, cy, r, rng, c_lat, c_lon):
     """
-    Draw the full radar background each frame: disc fill, range rings,
-    axis cross, cardinal letters, rotating sweep line, and coord text.
+    Draw the radar background each frame: disc fill, range rings,
+    axis cross, cardinal letters, and coord text.
     Call this first before drawing any targets or routes.
     """
     cv.create_oval(cx-r, cy-r, cx+r, cy+r, fill=RADAR, outline="")
@@ -145,13 +142,6 @@ def draw_radar_frame(cv, cx, cy, r, rng, sweep, c_lat, c_lon):
     for txt, dx, dy in (("N", 0, -(r+c1)), ("S", 0, r+c1),
                         ("W", -(r+c2), 0), ("E", r+c2, 0)):
         cv.create_text(cx+dx, cy+dy, text=txt, fill=RING_B, font=F_MD)
-
-    for off in range(-20, 1):
-        ang = math.radians((sweep + off) % 360)
-        cv.create_line(cx, cy,
-                       cx + int(r * math.sin(ang)),
-                       cy - int(r * math.cos(ang)),
-                       fill=(SWEEP if off == 0 else SWEEP_T))
 
     org = round(6 * SCALE)
     cv.create_text(org, org,

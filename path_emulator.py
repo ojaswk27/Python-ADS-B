@@ -162,7 +162,6 @@ class App(tk.Tk):
         self.resizable(False, False)
 
         self.c_lat, self.c_lon, self.rng = c_lat, c_lon, rng
-        self.sweep = 0.0
         self._tick = time.monotonic()
 
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
@@ -397,7 +396,6 @@ class App(tk.Tk):
         now = time.monotonic()
         dt  = now - self._tick
         self._tick = now
-        self.sweep = (self.sweep + ui.SWEEP_SPD * dt) % 360.0
 
         with self._lock:
             for ac in self._aircraft:
@@ -413,8 +411,7 @@ class App(tk.Tk):
         cv = self.cv
         cv.delete("all")
         cx, cy, r = ui.geom()
-        ui.draw_radar_frame(cv, cx, cy, r, self.rng, self.sweep,
-                            self.c_lat, self.c_lon)
+        ui.draw_radar_frame(cv, cx, cy, r, self.rng, self.c_lat, self.c_lon)
 
         with self._lock:
             snap = [(ac, list(ac.waypoints), ac.lat, ac.lon,

@@ -20,56 +20,23 @@ import tkinter as tk
 from collections import deque
 
 import net_config
+import radar_ui as ui
 from adsb_decoder import Aircraft, decode_message
 
 
-# ── Palette (monochrome) ──────────────────────────────────────────────────────
+# ── Radar-specific palette ────────────────────────────────────────────────────
 
-_BG      = "#000000"
-_RADAR   = "#050505"
-_RING_D  = "#1c1c1c"
-_RING_B  = "#444444"
-_SWEEP   = "#ffffff"
-_SWEEP_T = "#1a1a1a"
-_DIM     = "#444444"
-_PANEL   = "#0c0c0c"
-_FG      = "#cccccc"
-_FG_DIM  = "#555555"
-_SEP     = "#1e1e1e"
-_ENTRY   = "#111111"
-_BTN     = "#1a1a1a"
-_BTN_ACT = "#2a2a2a"
-
-# Blip colours by age since last illumination
+# Blip colours by age since last sweep illumination
 _B_FRESH = "#ffffff"   # 0 – 3 s
 _B_MED   = "#888888"   # 3 – 10 s
 _B_OLD   = "#444444"   # 10 – 30 s
 
-# Trail dots (newest → oldest)
+# Trail dots, newest to oldest
 _TRAIL = ["#444444", "#3a3a3a", "#303030", "#262626",
           "#1e1e1e", "#181818", "#121212", "#0e0e0e"]
 
-_CANVAS_SZ = 680
-_PANEL_W   = 200
-_SWEEP_SPD = 36.0
-
-
-# ── Coordinate helper ─────────────────────────────────────────────────────────
-
-def _ll_to_xy(lat, lon, cx, cy, r, c_lat, c_lon, rng):
-    s    = r / rng
-    nm_e = (lon - c_lon) * 60.0 * math.cos(math.radians(c_lat))
-    nm_n = (lat - c_lat) * 60.0
-    if math.hypot(nm_e, nm_n) > rng * 1.02:
-        return None
-    return cx + nm_e * s, cy - nm_n * s
-
 
 # ── App ───────────────────────────────────────────────────────────────────────
-
-def _sep(parent):
-    tk.Frame(parent, bg=_SEP, height=1).pack(fill=tk.X, padx=0, pady=4)
-
 
 class App(tk.Tk):
     """
@@ -81,7 +48,7 @@ class App(tk.Tk):
     def __init__(self, group, port, iface, c_lat, c_lon, rng):
         super().__init__()
         self.title("Radar Display")
-        self.configure(bg=_PANEL)
+        self.configure(bg=ui.PANEL)
         self.resizable(False, False)
 
         self.c_lat, self.c_lon, self.rng = c_lat, c_lon, rng
@@ -99,72 +66,55 @@ class App(tk.Tk):
                          args=(group, port, iface), daemon=True).start()
         self._loop()
 
-    # ── geometry ──────────────────────────────────────────────────────────────
-
-    def _geom(self):
-        c = _CANVAS_SZ // 2
-        return c, c, c - 18
+    # ── coordinate helper ─────────────────────────────────────────────────────
 
     def _to_xy(self, lat, lon):
-        cx, cy, r = self._geom()
-        return _ll_to_xy(lat, lon, cx, cy, r, self.c_lat, self.c_lon, self.rng)
+        cx, cy, r = ui.geom()
+        return ui.ll_to_xy(lat, lon, cx, cy, r, self.c_lat, self.c_lon, self.rng)
 
     # ── UI ────────────────────────────────────────────────────────────────────
 
-    def _entry_row(self, parent, label, var):
-        f = tk.Frame(parent, bg=_PANEL)
-        f.pack(fill=tk.X, padx=8, pady=1)
-        tk.Label(f, text=label, bg=_PANEL, fg=_FG_DIM,
-                 font=("Courier", 8), width=9, anchor="w").pack(side=tk.LEFT)
-        tk.Entry(f, textvariable=var, width=8,
-                 bg=_ENTRY, fg=_FG, insertbackground=_FG,
-                 font=("Courier", 9), relief=tk.FLAT, bd=4
-                 ).pack(side=tk.LEFT, fill=tk.X, expand=True)
-
     def _build_ui(self):
-        self.cv = tk.Canvas(self, width=_CANVAS_SZ, height=_CANVAS_SZ,
-                            bg=_BG, highlightthickness=0, cursor="none")
+        self.cv = tk.Canvas(self, width=ui.CANVAS_SZ, height=ui.CANVAS_SZ,
+                            bg=ui.BG, highlightthickness=0, cursor="none")
         self.cv.pack(side=tk.LEFT)
 
-        p = tk.Frame(self, bg=_PANEL, width=_PANEL_W)
-        p.pack(side=tk.LEFT, fill=tk.Y)
-        p.pack_propagate(False)
+        p = ui.make_panel(self)
 
-        tk.Frame(p, bg=_PANEL, height=10).pack()
-        tk.Label(p, text="TRACKS", bg=_PANEL, fg=_FG,
-                 font=("Courier", 8), anchor="w").pack(fill=tk.X, padx=8)
-        _sep(p)
+        tk.Frame(p, bg=ui.PANEL, height=round(10 * ui.SCALE)).pack()
+        tk.Label(p, text="TRACKS", bg=ui.PANEL, fg=ui.FG,
+                 font=ui.F_MD, anchor="w").pack(fill=tk.X, padx=ui.PAD)
+        ui.sep(p)
 
         self._track_box = tk.Text(
-            p, bg=_ENTRY, fg=_FG, font=("Courier", 8),
+            p, bg=ui.ENTRY, fg=ui.FG, font=ui.F_MD,
             relief=tk.FLAT, bd=0, height=14, state=tk.DISABLED,
             cursor="arrow", wrap=tk.NONE, highlightthickness=0)
-        self._track_box.pack(fill=tk.X, padx=8)
-        self._track_box.tag_configure("hdr", foreground=_FG,
-                                      font=("Courier", 8, "bold"))
+        self._track_box.pack(fill=tk.X, padx=ui.PAD)
+        self._track_box.tag_configure("hdr", foreground=ui.FG, font=ui.F_BLD)
         self._track_box.tag_configure("val", foreground="#888888")
         self._track_box.tag_configure("dim", foreground="#444444")
 
-        _sep(p)
-        tk.Label(p, text="RADAR", bg=_PANEL, fg=_FG,
-                 font=("Courier", 8), anchor="w").pack(fill=tk.X, padx=8)
+        ui.sep(p)
+        tk.Label(p, text="RADAR", bg=ui.PANEL, fg=ui.FG,
+                 font=ui.F_MD, anchor="w").pack(fill=tk.X, padx=ui.PAD)
 
         self._v_clat = tk.StringVar(value=str(self.c_lat))
         self._v_clon = tk.StringVar(value=str(self.c_lon))
         self._v_rng  = tk.StringVar(value=str(int(self.rng)))
-        self._entry_row(p, "lat", self._v_clat)
-        self._entry_row(p, "lon", self._v_clon)
-        self._entry_row(p, "range nm", self._v_rng)
+        ui.entry_row(p, "lat",      self._v_clat)
+        ui.entry_row(p, "lon",      self._v_clon)
+        ui.entry_row(p, "range nm", self._v_rng)
         tk.Button(p, text="Apply", command=self._apply,
-                  bg=_BTN, fg=_FG, activebackground=_BTN_ACT,
-                  font=("Courier", 8), relief=tk.FLAT, bd=0, cursor="hand2"
-                  ).pack(fill=tk.X, padx=8, pady=4)
+                  bg=ui.BTN, fg=ui.FG, activebackground=ui.BTN_ACT,
+                  font=ui.F_MD, relief=tk.FLAT, bd=0, cursor="hand2"
+                  ).pack(fill=tk.X, padx=ui.PAD, pady=ui.PAD)
 
-        _sep(p)
+        ui.sep(p)
         self._v_status = tk.StringVar(value="—")
-        tk.Label(p, textvariable=self._v_status, bg=_PANEL, fg=_FG_DIM,
-                 font=("Courier", 7), justify=tk.LEFT, anchor="w"
-                 ).pack(fill=tk.X, padx=8)
+        tk.Label(p, textvariable=self._v_status, bg=ui.PANEL, fg=ui.FG_DIM,
+                 font=ui.F_SM, justify=tk.LEFT, anchor="w"
+                 ).pack(fill=tk.X, padx=ui.PAD)
 
     def _apply(self):
         try:
@@ -180,7 +130,7 @@ class App(tk.Tk):
         now = time.monotonic()
         dt  = now - self._tick
         self._tick = now
-        self.sweep = (self.sweep + _SWEEP_SPD * dt) % 360.0
+        self.sweep = (self.sweep + ui.SWEEP_SPD * dt) % 360.0
 
         with self._lock:
             for icao in list(self._illum):
@@ -200,7 +150,7 @@ class App(tk.Tk):
                         * math.cos(math.radians(self.c_lat)))
                 nm_n = (ac.lat - self.c_lat) * 60.0
                 brng = math.degrees(math.atan2(nm_e, nm_n)) % 360.0
-                if (self.sweep - brng) % 360.0 <= _SWEEP_SPD * dt + 2.0:
+                if (self.sweep - brng) % 360.0 <= ui.SWEEP_SPD * dt + 2.0:
                     self._illum[icao] = 0.0
 
             fleet   = dict(self._fleet)
@@ -217,43 +167,11 @@ class App(tk.Tk):
     def _draw(self, fleet, history, illum):
         cv = self.cv
         cv.delete("all")
-        cx, cy, r = self._geom()
+        cx, cy, r = ui.geom()
+        ui.draw_radar_frame(cv, cx, cy, r, self.rng, self.sweep,
+                            self.c_lat, self.c_lon)
 
-        cv.create_oval(cx-r, cy-r, cx+r, cy+r, fill=_RADAR, outline="")
-
-        step = 50 if self.rng <= 350 else 100
-        ring = step
-        while ring < self.rng:
-            rp = int(r * ring / self.rng)
-            cv.create_oval(cx-rp, cy-rp, cx+rp, cy+rp,
-                           outline=_RING_D, width=1)
-            a = math.radians(42)
-            cv.create_text(cx + int(rp * math.sin(a)) + 2,
-                           cy - int(rp * math.cos(a)) - 8,
-                           text=str(ring), fill=_DIM, font=("Courier", 7))
-            ring += step
-
-        cv.create_oval(cx-r, cy-r, cx+r, cy+r, outline=_RING_B, width=1)
-        cv.create_line(cx, cy-r, cx, cy+r, fill=_RING_D)
-        cv.create_line(cx-r, cy, cx+r, cy, fill=_RING_D)
-
-        for txt, dx, dy in (("N", 0, -(r+12)), ("S", 0, r+12),
-                             ("W", -(r+13), 0), ("E", r+13, 0)):
-            cv.create_text(cx+dx, cy+dy, text=txt,
-                           fill=_RING_B, font=("Courier", 8))
-
-        for off in range(-20, 1):
-            ang = math.radians((self.sweep + off) % 360)
-            cv.create_line(cx, cy,
-                           cx + int(r * math.sin(ang)),
-                           cy - int(r * math.cos(ang)),
-                           fill=(_SWEEP if off == 0 else _SWEEP_T))
-
-        cv.create_text(6, 6,
-                       text=f"{self.c_lat:+.3f}  {self.c_lon:+.3f}  {self.rng:.0f}nm",
-                       fill=_DIM, font=("Courier", 7), anchor="nw")
-
-        # trails
+        td = ui.TRAIL_DOT
         for icao, pts in history.items():
             if illum.get(icao, 999.0) > 30.0:
                 continue
@@ -261,10 +179,9 @@ class App(tk.Tk):
                 pt = self._to_xy(la, lo)
                 if pt:
                     c = _TRAIL[min(i, len(_TRAIL) - 1)]
-                    cv.create_oval(pt[0]-2, pt[1]-2, pt[0]+2, pt[1]+2,
+                    cv.create_oval(pt[0]-td, pt[1]-td, pt[0]+td, pt[1]+td,
                                    fill=c, outline="")
 
-        # blips
         for icao, ac in fleet.items():
             if ac.lat is None:
                 continue
@@ -279,19 +196,17 @@ class App(tk.Tk):
         col = _B_FRESH if age < 3 else (_B_MED if age < 10 else _B_OLD)
         hdg = math.radians(ac.track if ac.track is not None else
                            (ac.heading or 0.0))
-        sz, v = 8, []
-        for a in (hdg, hdg + math.radians(148), hdg - math.radians(148)):
-            v += [x + sz * math.sin(a), y - sz * math.cos(a)]
-        cv.create_polygon(v, fill=col, outline="")
+        ui.draw_blip(cv, x, y, hdg, col)
         cs  = (ac.callsign or ac.icao).strip()
         alt = f"FL{ac.altitude//100:03d}" if ac.altitude else "???"
-        cv.create_text(x+12, y-12, text=cs,
-                       fill=_FG, font=("Courier", 8, "bold"), anchor="w")
-        cv.create_text(x+12, y-2,  text=alt,
-                       fill=_DIM, font=("Courier", 7), anchor="w")
+        cv.create_text(x + ui.LBL_DX, y - ui.LBL_DY,
+                       text=cs, fill=ui.FG, font=ui.F_BLD, anchor="w")
+        cv.create_text(x + ui.LBL_DX, y - round(2 * ui.SCALE),
+                       text=alt, fill=ui.DIM, font=ui.F_SM, anchor="w")
         if ac.speed:
-            cv.create_text(x+12, y+7, text=f"{ac.speed}kt",
-                           fill=_DIM, font=("Courier", 7), anchor="w")
+            cv.create_text(x + ui.LBL_DX, y + round(7 * ui.SCALE),
+                           text=f"{ac.speed}kt",
+                           fill=ui.DIM, font=ui.F_SM, anchor="w")
 
     def _update_panel(self, fleet, illum):
         active = [(icao, ac) for icao, ac in sorted(fleet.items())

@@ -1,6 +1,23 @@
+# Python
 .venv/
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Output / logs
 *.ast
 *.log
+
+# macOS
 .DS_Store
+.AppleDouble
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo

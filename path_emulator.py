@@ -27,17 +27,12 @@ import time
 import tkinter as tk
 
 import net_config
+import radar_ui as ui
 from aircraft_emulator import build_identification, build_position, build_velocity
 
 
-# ── Palette (monochrome) ──────────────────────────────────────────────────────
+# ── Path-specific palette ─────────────────────────────────────────────────────
 
-_BG      = "#000000"
-_RADAR   = "#050505"
-_RING_D  = "#1c1c1c"
-_RING_B  = "#444444"
-_SWEEP   = "#ffffff"
-_SWEEP_T = "#1a1a1a"
 _WP      = "#888888"
 _WP_SEL  = "#ffffff"
 _WP_NEXT = "#aaaaaa"
@@ -46,41 +41,9 @@ _PATH_S  = "#555555"
 _BLIP    = "#ffffff"
 _BLIP_S  = "#ffffff"
 _LBL     = "#aaaaaa"
-_DIM     = "#444444"
-_PANEL   = "#0c0c0c"
-_FG      = "#cccccc"
-_FG_DIM  = "#555555"
-_SEP     = "#1e1e1e"
-_ENTRY   = "#111111"
-_BTN     = "#1a1a1a"
-_BTN_ACT = "#2a2a2a"
-
-_CANVAS_SZ = 680
-_PANEL_W   = 200
-_HIT_WP    = 10
-_SWEEP_SPD = 36.0   # deg/s
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _ll_to_xy(lat, lon, cx, cy, r, c_lat, c_lon, rng):
-    s   = r / rng
-    nm_e = (lon - c_lon) * 60.0 * math.cos(math.radians(c_lat))
-    nm_n = (lat - c_lat) * 60.0
-    if math.hypot(nm_e, nm_n) > rng * 1.02:
-        return None
-    return cx + nm_e * s, cy - nm_n * s
-
-
-def _xy_to_ll(x, y, cx, cy, r, c_lat, c_lon, rng):
-    s    = r / rng
-    nm_e = (x - cx) / s
-    nm_n = (cy - y) / s
-    if math.hypot(nm_e, nm_n) > rng:
-        return None
-    return (c_lat + nm_n / 60.0,
-            c_lon + nm_e / (60.0 * math.cos(math.radians(c_lat))))
-
 
 def _dist_nm(lat0, lon0, lat1, lon1):
     dlat = (lat1 - lat0) * 60.0
@@ -190,16 +153,12 @@ class WaypointAircraft:
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
-def _sep(parent):
-    tk.Frame(parent, bg=_SEP, height=1).pack(fill=tk.X, padx=0, pady=4)
-
-
 class App(tk.Tk):
 
     def __init__(self, group, port, iface, c_lat, c_lon, rng):
         super().__init__()
         self.title("Path Emulator")
-        self.configure(bg=_PANEL)
+        self.configure(bg=ui.PANEL)
         self.resizable(False, False)
 
         self.c_lat, self.c_lon, self.rng = c_lat, c_lon, rng
@@ -225,22 +184,18 @@ class App(tk.Tk):
         threading.Thread(target=self._tx_loop, daemon=True).start()
         self._loop()
 
-    # ── geometry ──────────────────────────────────────────────────────────────
-
-    def _geom(self):
-        c = _CANVAS_SZ // 2
-        return c, c, c - 18
+    # ── coordinate helpers ────────────────────────────────────────────────────
 
     def _to_xy(self, lat, lon):
-        cx, cy, r = self._geom()
-        return _ll_to_xy(lat, lon, cx, cy, r, self.c_lat, self.c_lon, self.rng)
+        cx, cy, r = ui.geom()
+        return ui.ll_to_xy(lat, lon, cx, cy, r, self.c_lat, self.c_lon, self.rng)
 
     def _to_ll(self, x, y):
-        cx, cy, r = self._geom()
-        return _xy_to_ll(x, y, cx, cy, r, self.c_lat, self.c_lon, self.rng)
+        cx, cy, r = ui.geom()
+        return ui.xy_to_ll(x, y, cx, cy, r, self.c_lat, self.c_lon, self.rng)
 
     def _nearest_wp(self, x, y):
-        best, bd = None, _HIT_WP
+        best, bd = None, ui.HIT_WP
         for ac in self._aircraft:
             for i, (la, lo) in enumerate(ac.waypoints):
                 pt = self._to_xy(la, lo)
@@ -250,32 +205,18 @@ class App(tk.Tk):
 
     # ── UI ────────────────────────────────────────────────────────────────────
 
-    def _lbl(self, parent, text, dim=False):
-        tk.Label(parent, text=text, bg=_PANEL,
-                 fg=_FG_DIM if dim else _FG,
-                 font=("Courier", 8), anchor="w").pack(fill=tk.X, padx=8)
-
-    def _entry_row(self, parent, label, var):
-        f = tk.Frame(parent, bg=_PANEL)
-        f.pack(fill=tk.X, padx=8, pady=1)
-        tk.Label(f, text=label, bg=_PANEL, fg=_FG_DIM,
-                 font=("Courier", 8), width=9, anchor="w").pack(side=tk.LEFT)
-        tk.Entry(f, textvariable=var, width=8,
-                 bg=_ENTRY, fg=_FG, insertbackground=_FG,
-                 font=("Courier", 9), relief=tk.FLAT, bd=4
-                 ).pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-    def _button(self, parent, text, cmd, padx=8, pady=3):
+    def _button(self, parent, text, cmd):
         b = tk.Button(parent, text=text, command=cmd,
-                      bg=_BTN, fg=_FG, activebackground=_BTN_ACT,
-                      activeforeground=_FG, font=("Courier", 8),
-                      relief=tk.FLAT, bd=0, cursor="hand2", pady=pady)
-        b.pack(fill=tk.X, padx=padx, pady=2)
+                      bg=ui.BTN, fg=ui.FG, activebackground=ui.BTN_ACT,
+                      activeforeground=ui.FG, font=ui.F_MD,
+                      relief=tk.FLAT, bd=0, cursor="hand2",
+                      pady=round(3 * ui.SCALE))
+        b.pack(fill=tk.X, padx=ui.PAD, pady=round(2 * ui.SCALE))
         return b
 
     def _build_ui(self):
-        self.cv = tk.Canvas(self, width=_CANVAS_SZ, height=_CANVAS_SZ,
-                            bg=_BG, cursor="crosshair", highlightthickness=0)
+        self.cv = tk.Canvas(self, width=ui.CANVAS_SZ, height=ui.CANVAS_SZ,
+                            bg=ui.BG, cursor="crosshair", highlightthickness=0)
         self.cv.pack(side=tk.LEFT)
         self.cv.bind("<Button-1>",        self._press)
         self.cv.bind("<B1-Motion>",       self._drag)
@@ -284,75 +225,73 @@ class App(tk.Tk):
         self.cv.bind("<Button-3>",        self._rclick)
         self.cv.bind("<Motion>",          self._hover)
 
-        p = tk.Frame(self, bg=_PANEL, width=_PANEL_W)
-        p.pack(side=tk.LEFT, fill=tk.Y)
-        p.pack_propagate(False)
+        p = ui.make_panel(self)
 
-        # spacer at top
-        tk.Frame(p, bg=_PANEL, height=10).pack()
-
-        self._lbl(p, "AIRCRAFT")
-        _sep(p)
+        tk.Frame(p, bg=ui.PANEL, height=round(10 * ui.SCALE)).pack()
+        tk.Label(p, text="AIRCRAFT", bg=ui.PANEL, fg=ui.FG,
+                 font=ui.F_MD, anchor="w").pack(fill=tk.X, padx=ui.PAD)
+        ui.sep(p)
         self._button(p, "+ New", self._new_ac)
 
-        self._lb = tk.Listbox(p, bg=_ENTRY, fg=_FG, selectbackground="#222222",
-                              selectforeground="#ffffff", font=("Courier", 8),
-                              relief=tk.FLAT, bd=0, height=5, activestyle="none",
-                              highlightthickness=0)
-        self._lb.pack(fill=tk.X, padx=8, pady=(4, 0))
+        self._lb = tk.Listbox(p, bg=ui.ENTRY, fg=ui.FG,
+                              selectbackground="#222222",
+                              selectforeground="#ffffff", font=ui.F_MD,
+                              relief=tk.FLAT, bd=0, height=5,
+                              activestyle="none", highlightthickness=0)
+        self._lb.pack(fill=tk.X, padx=ui.PAD, pady=(ui.PAD2, 0))
         self._lb.bind("<<ListboxSelect>>", self._lb_sel)
 
-        _sep(p)
+        ui.sep(p)
         self._v_name = tk.StringVar(value="—")
-        tk.Label(p, textvariable=self._v_name, bg=_PANEL, fg=_FG,
-                 font=("Courier", 8, "bold"), anchor="w").pack(fill=tk.X, padx=8)
+        tk.Label(p, textvariable=self._v_name, bg=ui.PANEL, fg=ui.FG,
+                 font=ui.F_BLD, anchor="w").pack(fill=tk.X, padx=ui.PAD)
 
         self._v_alt  = tk.StringVar(value="35000")
         self._v_spd  = tk.StringVar(value="450")
         self._v_loop = tk.BooleanVar(value=True)
-        self._entry_row(p, "alt ft",   self._v_alt)
-        self._entry_row(p, "speed kt", self._v_spd)
+        ui.entry_row(p, "alt ft",   self._v_alt)
+        ui.entry_row(p, "speed kt", self._v_spd)
 
-        lf = tk.Frame(p, bg=_PANEL)
-        lf.pack(fill=tk.X, padx=8, pady=2)
-        tk.Label(lf, text="loop", bg=_PANEL, fg=_FG_DIM,
-                 font=("Courier", 8), width=9, anchor="w").pack(side=tk.LEFT)
-        tk.Checkbutton(lf, variable=self._v_loop, bg=_PANEL,
-                       fg=_FG, selectcolor="#111111",
-                       activebackground=_PANEL,
+        lf = tk.Frame(p, bg=ui.PANEL)
+        lf.pack(fill=tk.X, padx=ui.PAD, pady=ui.PAD2)
+        tk.Label(lf, text="loop", bg=ui.PANEL, fg=ui.FG_DIM,
+                 font=ui.F_MD, width=9, anchor="w").pack(side=tk.LEFT)
+        tk.Checkbutton(lf, variable=self._v_loop, bg=ui.PANEL,
+                       fg=ui.FG, selectcolor=ui.ENTRY,
+                       activebackground=ui.PANEL,
                        command=lambda: setattr(self._selected, "loop",
                                                self._v_loop.get())
                        if self._selected else None).pack(side=tk.LEFT)
 
-        bf = tk.Frame(p, bg=_PANEL)
-        bf.pack(fill=tk.X, padx=8, pady=4)
+        bf = tk.Frame(p, bg=ui.PANEL)
+        bf.pack(fill=tk.X, padx=ui.PAD, pady=ui.PAD)
         tk.Button(bf, text="Apply", command=self._apply_sel,
-                  bg=_BTN, fg=_FG, activebackground=_BTN_ACT,
-                  font=("Courier", 8), relief=tk.FLAT, bd=0, cursor="hand2"
-                  ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+                  bg=ui.BTN, fg=ui.FG, activebackground=ui.BTN_ACT,
+                  font=ui.F_MD, relief=tk.FLAT, bd=0, cursor="hand2"
+                  ).pack(side=tk.LEFT, fill=tk.X, expand=True,
+                         padx=(0, ui.PAD2))
         tk.Button(bf, text="Delete", command=self._del_ac,
-                  bg=_BTN, fg="#888888", activebackground=_BTN_ACT,
-                  font=("Courier", 8), relief=tk.FLAT, bd=0, cursor="hand2"
+                  bg=ui.BTN, fg="#888888", activebackground=ui.BTN_ACT,
+                  font=ui.F_MD, relief=tk.FLAT, bd=0, cursor="hand2"
                   ).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        _sep(p)
+        ui.sep(p)
         self._v_status = tk.StringVar(value="—")
-        tk.Label(p, textvariable=self._v_status, bg=_PANEL, fg=_FG_DIM,
-                 font=("Courier", 7), justify=tk.LEFT, anchor="w"
-                 ).pack(fill=tk.X, padx=8)
+        tk.Label(p, textvariable=self._v_status, bg=ui.PANEL, fg=ui.FG_DIM,
+                 font=ui.F_SM, justify=tk.LEFT, anchor="w"
+                 ).pack(fill=tk.X, padx=ui.PAD)
 
-        # hint at bottom
-        tk.Frame(p, bg=_PANEL).pack(fill=tk.Y, expand=True)
-        _sep(p)
+        tk.Frame(p, bg=ui.PANEL).pack(fill=tk.Y, expand=True)
+        ui.sep(p)
         hint = "click  → waypoint\ndrag   → move\nR-click → delete\n2+ wps to fly"
-        tk.Label(p, text=hint, bg=_PANEL, fg="#333333",
-                 font=("Courier", 7), justify=tk.LEFT, anchor="w"
-                 ).pack(fill=tk.X, padx=8, pady=(0, 8))
+        tk.Label(p, text=hint, bg=ui.PANEL, fg="#333333",
+                 font=ui.F_SM, justify=tk.LEFT, anchor="w"
+                 ).pack(fill=tk.X, padx=ui.PAD, pady=(0, ui.PAD))
 
         self._v_cur = tk.StringVar()
-        tk.Label(p, textvariable=self._v_cur, bg=_PANEL, fg="#444444",
-                 font=("Courier", 7), anchor="w"
-                 ).pack(fill=tk.X, padx=8, pady=(0, 6))
+        tk.Label(p, textvariable=self._v_cur, bg=ui.PANEL, fg="#444444",
+                 font=ui.F_SM, anchor="w"
+                 ).pack(fill=tk.X, padx=ui.PAD, pady=(0, round(6 * ui.SCALE)))
 
     # ── mouse ─────────────────────────────────────────────────────────────────
 
@@ -426,8 +365,7 @@ class App(tk.Tk):
                    if a is self._selected), None)
         self._lb.delete(0, tk.END)
         for ac in self._aircraft:
-            self._lb.insert(tk.END,
-                f" {ac.icao}  {len(ac.waypoints)} wp")
+            self._lb.insert(tk.END, f" {ac.icao}  {len(ac.waypoints)} wp")
         if si is not None:
             self._lb.selection_set(si)
 
@@ -459,7 +397,7 @@ class App(tk.Tk):
         now = time.monotonic()
         dt  = now - self._tick
         self._tick = now
-        self.sweep = (self.sweep + _SWEEP_SPD * dt) % 360.0
+        self.sweep = (self.sweep + ui.SWEEP_SPD * dt) % 360.0
 
         with self._lock:
             for ac in self._aircraft:
@@ -474,44 +412,9 @@ class App(tk.Tk):
     def _draw(self):
         cv = self.cv
         cv.delete("all")
-        cx, cy, r = self._geom()
-
-        cv.create_oval(cx-r, cy-r, cx+r, cy+r, fill=_RADAR, outline="")
-
-        # range rings
-        step = 50 if self.rng <= 350 else 100
-        ring = step
-        while ring < self.rng:
-            rp = int(r * ring / self.rng)
-            cv.create_oval(cx-rp, cy-rp, cx+rp, cy+rp,
-                           outline=_RING_D, width=1)
-            a = math.radians(42)
-            cv.create_text(cx + int(rp * math.sin(a)) + 2,
-                           cy - int(rp * math.cos(a)) - 8,
-                           text=str(ring), fill=_DIM, font=("Courier", 7))
-            ring += step
-
-        cv.create_oval(cx-r, cy-r, cx+r, cy+r, outline=_RING_B, width=1)
-        cv.create_line(cx, cy-r, cx, cy+r, fill=_RING_D)
-        cv.create_line(cx-r, cy, cx+r, cy, fill=_RING_D)
-
-        for txt, dx, dy in (("N", 0, -(r+12)), ("S", 0, r+12),
-                             ("W", -(r+13), 0), ("E", r+13, 0)):
-            cv.create_text(cx+dx, cy+dy, text=txt,
-                           fill=_RING_B, font=("Courier", 8))
-
-        # sweep
-        for off in range(-20, 1):
-            ang = math.radians((self.sweep + off) % 360)
-            cv.create_line(cx, cy,
-                           cx + int(r * math.sin(ang)),
-                           cy - int(r * math.cos(ang)),
-                           fill=(_SWEEP if off == 0 else _SWEEP_T),
-                           width=(1 if off == 0 else 1))
-
-        cv.create_text(6, 6,
-                       text=f"{self.c_lat:+.3f}  {self.c_lon:+.3f}  {self.rng:.0f}nm",
-                       fill=_DIM, font=("Courier", 7), anchor="nw")
+        cx, cy, r = ui.geom()
+        ui.draw_radar_frame(cv, cx, cy, r, self.rng, self.sweep,
+                            self.c_lat, self.c_lon)
 
         with self._lock:
             snap = [(ac, list(ac.waypoints), ac.lat, ac.lon,
@@ -521,15 +424,16 @@ class App(tk.Tk):
             self._draw_route(cv, ac, wps, lat, lon, hdg, seg)
 
     def _draw_route(self, cv, ac, wps, lat, lon, hdg, seg):
-        sel  = ac is self._selected
-        pts  = [self._to_xy(la, lo) for la, lo in wps]
+        sel = ac is self._selected
+        pts = [self._to_xy(la, lo) for la, lo in wps]
+        d   = ui.WP_DOT
+        lbl = round(7 * ui.SCALE)   # waypoint number label offset
 
         for i in range(len(pts) - 1):
             a, b = pts[i], pts[i+1]
             if a and b:
                 cv.create_line(a[0], a[1], b[0], b[1],
-                               fill=(_PATH_S if sel else _PATH),
-                               dash=(4, 4))
+                               fill=(_PATH_S if sel else _PATH), dash=(4, 4))
         if ac.loop and len(pts) >= 2 and pts[0] and pts[-1]:
             cv.create_line(pts[-1][0], pts[-1][1], pts[0][0], pts[0][1],
                            fill=_PATH, dash=(2, 6))
@@ -539,10 +443,10 @@ class App(tk.Tk):
                 continue
             is_tgt = sel and i == (seg + 1) % max(len(wps), 1)
             c = _WP_NEXT if is_tgt else (_WP_SEL if sel else _WP)
-            cv.create_oval(pt[0]-4, pt[1]-4, pt[0]+4, pt[1]+4,
+            cv.create_oval(pt[0]-d, pt[1]-d, pt[0]+d, pt[1]+d,
                            fill=c, outline="")
-            cv.create_text(pt[0]+7, pt[1]-7, text=str(i+1),
-                           fill=c, font=("Courier", 7))
+            cv.create_text(pt[0]+lbl, pt[1]-lbl, text=str(i+1),
+                           fill=c, font=ui.F_SM)
 
         if lat is None:
             return
@@ -550,16 +454,13 @@ class App(tk.Tk):
         if not pt:
             return
         x, y = pt
-        h  = math.radians(hdg)
-        sz = 8
-        v  = []
-        for a in (h, h + math.radians(148), h - math.radians(148)):
-            v += [x + sz * math.sin(a), y - sz * math.cos(a)]
-        cv.create_polygon(v, fill=_BLIP_S if sel else _BLIP, outline="")
-        cv.create_text(x+12, y-12, text=ac.callsign,
-                       fill=_LBL, font=("Courier", 8, "bold"), anchor="w")
-        cv.create_text(x+12, y-2,  text=f"FL{ac.alt_ft//100:03d}",
-                       fill=_DIM, font=("Courier", 7), anchor="w")
+        ui.draw_blip(cv, x, y, math.radians(hdg), _BLIP_S if sel else _BLIP)
+        cv.create_text(x + ui.LBL_DX, y - ui.LBL_DY,
+                       text=ac.callsign,
+                       fill=_LBL, font=ui.F_BLD, anchor="w")
+        cv.create_text(x + ui.LBL_DX, y - round(2 * ui.SCALE),
+                       text=f"FL{ac.alt_ft//100:03d}",
+                       fill=ui.DIM, font=ui.F_SM, anchor="w")
 
     # ── TX thread ─────────────────────────────────────────────────────────────
 

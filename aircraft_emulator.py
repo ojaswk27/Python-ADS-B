@@ -132,10 +132,16 @@ def build_position(icao: str, lat: float, lon: float,
 
 def build_velocity(icao: str, speed_kt: float, heading_deg: float,
                    vrate_fpm: int) -> str:
-    """TC=19 subtype-1 Airborne Velocity (ground speed) message."""
-    icao_int = int(icao, 16)
-    tc = 19
-    subtype = 1
+    """TC=19 Airborne Velocity (ground speed) message.
+
+    Subtype 1 (subsonic)  — 1 kt/LSB, max 1022 kt
+    Subtype 2 (supersonic) — 4 kt/LSB, max 4088 kt
+    Switches automatically at 1022 kt per ADS-B spec.
+    """
+    icao_int  = int(icao, 16)
+    tc        = 19
+    supersonic = speed_kt >= 1022.0
+    subtype   = 2 if supersonic else 1
 
     hdg = math.radians(heading_deg)
     v_ew = speed_kt * math.sin(hdg)   # positive = east
@@ -143,8 +149,12 @@ def build_velocity(icao: str, speed_kt: float, heading_deg: float,
 
     ew_sign = 1 if v_ew < 0 else 0
     ns_sign = 1 if v_ns < 0 else 0
-    ew_mag  = min(int(abs(v_ew)) + 1, 1023)
-    ns_mag  = min(int(abs(v_ns)) + 1, 1023)
+    if supersonic:
+        ew_mag = min(int(abs(v_ew) / 4) + 1, 1023)
+        ns_mag = min(int(abs(v_ns) / 4) + 1, 1023)
+    else:
+        ew_mag = min(int(abs(v_ew)) + 1, 1023)
+        ns_mag = min(int(abs(v_ns)) + 1, 1023)
 
     vr_sign = 1 if vrate_fpm < 0 else 0
     vr_mag  = min(abs(vrate_fpm) // 64 + 1, 511)

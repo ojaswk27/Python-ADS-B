@@ -245,11 +245,13 @@ class App(tk.Tk):
         tk.Label(p, textvariable=self._v_name, bg=ui.PANEL, fg=ui.FG,
                  font=ui.F_BLD, anchor="w").pack(fill=tk.X, padx=ui.PAD)
 
-        self._v_alt  = tk.StringVar(value="35000")
-        self._v_spd  = tk.StringVar(value="450")
+        self._v_alt  = tk.IntVar(value=35000)
+        self._v_spd  = tk.IntVar(value=450)
         self._v_loop = tk.BooleanVar(value=True)
-        ui.entry_row(p, "alt ft",   self._v_alt)
-        ui.entry_row(p, "speed kt", self._v_spd)
+        ui.slider_row(p, "alt ft",   self._v_alt, -1000, 50000, 25,
+                      command=self._apply_sel)
+        ui.slider_row(p, "speed kt", self._v_spd,     0,  4088,  1,
+                      command=self._apply_sel)
 
         lf = tk.Frame(p, bg=ui.PANEL)
         lf.pack(fill=tk.X, padx=ui.PAD, pady=ui.PAD2)
@@ -262,17 +264,10 @@ class App(tk.Tk):
                                                self._v_loop.get())
                        if self._selected else None).pack(side=tk.LEFT)
 
-        bf = tk.Frame(p, bg=ui.PANEL)
-        bf.pack(fill=tk.X, padx=ui.PAD, pady=ui.PAD)
-        tk.Button(bf, text="Apply", command=self._apply_sel,
-                  bg=ui.BTN, fg=ui.FG, activebackground=ui.BTN_ACT,
-                  font=ui.F_MD, relief=tk.FLAT, bd=0, cursor="hand2"
-                  ).pack(side=tk.LEFT, fill=tk.X, expand=True,
-                         padx=(0, ui.PAD2))
-        tk.Button(bf, text="Delete", command=self._del_ac,
+        tk.Button(p, text="Delete track", command=self._del_ac,
                   bg=ui.BTN, fg="#888888", activebackground=ui.BTN_ACT,
                   font=ui.F_MD, relief=tk.FLAT, bd=0, cursor="hand2"
-                  ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+                  ).pack(fill=tk.X, padx=ui.PAD, pady=ui.PAD)
 
         ui.sep(p)
         self._v_status = tk.StringVar(value="—")
@@ -343,8 +338,8 @@ class App(tk.Tk):
     def _select(self, ac):
         self._selected = ac
         self._v_name.set(f"{ac.icao}  {ac.callsign}")
-        self._v_alt.set(str(ac.alt_ft))
-        self._v_spd.set(str(ac.speed_kt))
+        self._v_alt.set(ac.alt_ft)
+        self._v_spd.set(int(ac.speed_kt))
         self._v_loop.set(ac.loop)
         idx = next((i for i, a in enumerate(self._aircraft) if a is ac), None)
         if idx is not None:
@@ -368,15 +363,12 @@ class App(tk.Tk):
         if si is not None:
             self._lb.selection_set(si)
 
-    def _apply_sel(self):
+    def _apply_sel(self, _val=None):
         if not self._selected:
             return
-        try:
-            with self._lock:
-                self._selected.alt_ft   = int(self._v_alt.get())
-                self._selected.speed_kt = int(self._v_spd.get())
-        except ValueError:
-            pass
+        with self._lock:
+            self._selected.alt_ft   = self._v_alt.get()
+            self._selected.speed_kt = self._v_spd.get()
 
     def _del_ac(self):
         if not self._selected:

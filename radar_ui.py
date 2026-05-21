@@ -102,6 +102,26 @@ def entry_row(parent, label, var):
     return e
 
 
+def slider_row(parent, label, var, from_, to, resolution=1, command=None):
+    """Pack a label/value header + horizontal slider into parent. Returns the Scale widget."""
+    f = tk.Frame(parent, bg=PANEL)
+    f.pack(fill=tk.X, padx=PAD, pady=max(1, PAD // 4))
+    hf = tk.Frame(f, bg=PANEL)
+    hf.pack(fill=tk.X)
+    tk.Label(hf, text=label, bg=PANEL, fg=FG_DIM,
+             font=F_MD, anchor="w").pack(side=tk.LEFT)
+    tk.Label(hf, textvariable=var, bg=PANEL, fg=FG,
+             font=F_MD, anchor="e").pack(side=tk.RIGHT)
+    kw = {"command": command} if command else {}
+    s = tk.Scale(f, variable=var, from_=from_, to=to, resolution=resolution,
+                 orient=tk.HORIZONTAL, bg=PANEL, fg=FG_DIM,
+                 troughcolor=ENTRY, highlightthickness=0, bd=0,
+                 showvalue=False, relief=tk.FLAT,
+                 sliderlength=round(12 * SCALE), **kw)
+    s.pack(fill=tk.X)
+    return s
+
+
 def make_panel(root):
     """Create and pack the right-side panel Frame. Returns the Frame."""
     p = tk.Frame(root, bg=PANEL, width=PANEL_W)

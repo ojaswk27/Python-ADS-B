@@ -1,0 +1,255 @@
+ADS-B DECODER — CORE PSEUDOCODE
+================================
+
+Input: one 28-character hex string (a full 112-bit Mode S Extended Squitter
+frame). For a live decoder you'd loop over many of these and keep a fleet
+dict keyed by ICAO; this pseudocode shows the single-message core.
+
+
+# ── 0. Hardcoded input ──────────────────────────────────────────────────
+MSG = "8D4840D6202CC371C32CE0576098"        # 28 hex chars = 112 bits
+
+
+# ── 1. Bit-extraction helper ────────────────────────────────────────────
+# Bit numbering is 1-indexed from MSB, matching ICAO convention.
+
+function get_bits(msg, start, end):
+    n     = int(msg, base=16)
+    total = length(msg) * 4
+    shift = total - end
+    mask  = (1 << (end - start + 1)) - 1
+    return (n >> shift) AND mask
+
+
+# ── 2. CRC check ────────────────────────────────────────────────────────
+# Mode S CRC-24 is computed over the whole 112-bit frame including the
+# 24-bit parity tail. Valid frames produce remainder == 0.
+
+function crc_valid(msg):
+    return crc24_remainder(int(msg, 16), bits=112) == 0
+
+if not crc_valid(MSG):
+    abort "bad CRC"
+
+
+# ── 3. Frame header ─────────────────────────────────────────────────────
+# Layout of a DF17 ADS-B frame:
+#   bits  1– 5  DF    (downlink format; 17 = ADS-B ES)
+#   bits  6– 8  CA    (capability)
+#   bits  9–32  ICAO  (24-bit aircraft address)
+#   bits 33–88  ME    (56-bit message payload)
+#       bits 33–37  TC  (type code, first 5 bits of ME)
+#   bits 89–112 CRC
+
+DF   = get_bits(MSG, 1, 5)
+ICAO = MSG[2:8]                       # bits 9-32 land on hex chars 2-7
+TC   = get_bits(MSG, 33, 37)
+
+if DF != 17 and DF != 18:
+    print "not an ADS-B ES frame"
+    stop
+
+
+# ── 4. Dispatch by Type Code ────────────────────────────────────────────
+#   TC  1–4  : Aircraft Identification
+#   TC  9–18 : Airborne Position (barometric altitude)
+#   TC  19   : Airborne Velocity
+#   TC 20–22 : Airborne Position (GNSS altitude)
+
+if 1 <= TC <= 4:
+    decode_identification(MSG)
+else if (9 <= TC <= 18) or (20 <= TC <= 22):
+    decode_position(MSG)
+else if TC == 19:
+    decode_velocity(MSG)
+else:
+    print "unsupported TC"
+
+
+# ── 5. Identification (callsign + wake category) ────────────────────────
+# ME layout:
+#   bits 38–40 : category (3 bits)
+#   bits 41–88 : 8 chars × 6 bits each, ACS charset
+
+CHARSET = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ#####_###############0123456789######"
+
+function decode_identification(msg):
+    category = get_bits(msg, 38, 40)
+    callsign = ""
+    for i in 0..7:
+        start = 41 + i*6
+        idx   = get_bits(msg, start, start+5)
+        callsign += CHARSET[idx]
+    callsign = strip "#" and whitespace
+    return (callsign, category)
+
+
+# ── 6. Altitude (12-bit AC field at message bits 41–52) ─────────────────
+# AC packs an M bit and a Q bit into a 13-bit altcode after inserting M=0
+# at position 6.
+#   Q=1 : 25-ft linear  →  alt = 25*N - 1000 ft
+#   Q=0 : Gillham 100-ft  (Gray-coded — rarely used in ADS-B)
+
+function decode_altitude(msg):
+    ac = get_bits(msg, 41, 52)
+    if ac == 0: return UNKNOWN
+    altcode = ((ac >> 6) << 7) | (ac AND 0x3F)
+    Q = (altcode >> 4) AND 1
+    if Q == 1:
+        N = ((altcode >> 2) AND 0x7E0)
+          | ((altcode >> 1) AND 0x10)
+          | (altcode AND 0x0F)
+        return 25*N - 1000
+    else:
+        return decode_gillham(altcode)        # rare path
+
+
+# ── 7. Position (CPR — Compact Position Reporting) ──────────────────────
+# A single frame is ambiguous: it carries only a 17-bit fractional offset
+# inside a latitude zone. You need TWO frames — one "even" and one "odd",
+# using different zone-grid sizes — to recover global position.
+#
+#  Even grid: 60 latitude bands, 6.000° tall
+#  Odd  grid: 59 latitude bands, 6.102° tall
+#  gcd(60, 59) = 1  →  unique zone index by Chinese Remainder Theorem
+#
+# Frame layout (in ME):
+#   bit  54     F (0 = even, 1 = odd)
+#   bits 55–71  CPR_lat raw (17 bits)
+#   bits 72–88  CPR_lon raw (17 bits)
+
+function decode_position(msg):
+    fmt     = get_bits(msg, 54, 54)
+    cpr_lat = get_bits(msg, 55, 71)
+    cpr_lon = get_bits(msg, 72, 88)
+    alt     = decode_altitude(msg)
+
+    # Per-ICAO state: store this frame in its slot, overwriting any older
+    # frame of the same parity. There is no queue — only "latest even" and
+    # "latest odd".
+    if fmt == 0:
+        STATE[ICAO].even = (cpr_lat, cpr_lon, now())
+    else:
+        STATE[ICAO].odd  = (cpr_lat, cpr_lon, now())
+
+    # Need both parities and they must be close in time (aircraft must not
+    # have crossed a CPR zone since the older frame was captured).
+    if STATE[ICAO].even == NULL or STATE[ICAO].odd == NULL:
+        return                       # awaiting pair
+    if |t_even - t_odd| > 10 seconds:
+        return                       # pair too stale to trust
+
+    (lat, lon) = cpr_resolve(STATE[ICAO].even,
+                             STATE[ICAO].odd,
+                             use_odd = (fmt == 1))   # report newer frame
+    STATE[ICAO].lat = lat
+    STATE[ICAO].lon = lon
+    STATE[ICAO].altitude = alt
+
+
+# ── 7a. CPR resolve (the math) ──────────────────────────────────────────
+function cpr_resolve(even, odd, use_odd):
+    # Normalise 17-bit raw values into fractions in [0, 1)
+    lat_e = even.cpr_lat / 131072
+    lon_e = even.cpr_lon / 131072
+    lat_o = odd.cpr_lat  / 131072
+    lon_o = odd.cpr_lon  / 131072
+
+    # CRT trick: find the unique zone index j consistent with both grids
+    j = floor(59*lat_e - 60*lat_o + 0.5)
+
+    # Reconstruct each frame's absolute latitude in its own grid
+    lat_even = (360/60) * (j mod 60 + lat_e)
+    lat_odd  = (360/59) * (j mod 59 + lat_o)
+
+    # Map [270°, 360°) back to negative latitudes
+    if lat_even >= 270: lat_even -= 360
+    if lat_odd  >= 270: lat_odd  -= 360
+
+    # Sanity check: both grids must agree on which longitude-zone-count
+    # band we landed in. If not, the pair straddled a band boundary —
+    # reject rather than guess.
+    if NL(lat_even) != NL(lat_odd):
+        return NULL
+
+    lat = lat_odd if use_odd else lat_even
+    nl  = NL(lat)
+    ni  = max(nl - (use_odd ? 1 : 0), 1)
+
+    # Same CRT trick again for longitude
+    m   = floor(lon_e*(nl-1) - lon_o*nl + 0.5)
+    lon = (360/ni) * (m mod ni + (use_odd ? lon_o : lon_e))
+    if lon >= 180: lon -= 360
+
+    return (lat, lon)
+
+
+# ── 7b. NL — number of longitude zones at a given latitude ──────────────
+# Longitude zones narrow toward the poles. NL ranges from 59 near the
+# equator down to 1 at the poles.
+
+function NL(lat):
+    if |lat| >= 87: return 1
+    return floor(2*pi / acos(
+        1 - (1 - cos(pi/(2*NZ))) / cos(radians(lat))^2
+    ))
+NZ = 15
+
+
+# ── 8. Velocity (TC 19) ─────────────────────────────────────────────────
+# Subtypes:
+#   1 : ground speed, 1 kt/LSB  (subsonic, max 1022 kt)
+#   2 : ground speed, 4 kt/LSB  (supersonic, max 4088 kt)
+#   3 : airspeed,     1 kt/LSB
+#   4 : airspeed,     4 kt/LSB
+#
+# Subtype 1/2 ME layout (bit positions inside the 56-bit ME):
+#   bits  5– 7  subtype
+#   bit  13     v_ew sign  (1 = west)
+#   bits 14–23  v_ew magnitude  (actual = mag - 1, then * scale)
+#   bit  24     v_ns sign  (1 = south)
+#   bits 25–34  v_ns magnitude
+#   bit  35     VR source (0 = GNSS, 1 = BARO)
+#   bit  36     VR sign   (1 = descent)
+#   bits 37–45  VR magnitude  (actual = (mag - 1) * 64 fpm)
+
+function decode_velocity(msg):
+    p       = get_bits(msg, 33, 88)           # the 56-bit ME
+    subtype = (p >> 48) AND 0x7
+
+    if subtype in {1, 2}:
+        scale = 4 if subtype == 2 else 1
+
+        v_ew_sign = (p >> 42) AND 1
+        v_ew_mag  = (p >> 32) AND 0x3FF
+        v_ns_sign = (p >> 31) AND 1
+        v_ns_mag  = (p >> 21) AND 0x3FF
+
+        v_we = (v_ew_mag - 1) * scale * (v_ew_sign ? -1 : 1)
+        v_sn = (v_ns_mag - 1) * scale * (v_ns_sign ? -1 : 1)
+
+        speed = hypot(v_we, v_sn)
+        track = atan2(v_we, v_sn) in degrees, normalised to [0, 360)
+
+    else if subtype in {3, 4}:
+        # airspeed + heading variant — same field layout, different meanings
+        ...
+
+    # Vertical rate (common to all subtypes)
+    vr_src = (p >> 20) AND 1
+    vr_sgn = (p >> 19) AND 1
+    vr_mag = (p >> 10) AND 0x1FF
+    vrate  = (vr_mag - 1) * 64 * (vr_sgn ? -1 : 1) fpm
+
+    return (speed, track, vrate)
+
+
+# ── 9. End of core ──────────────────────────────────────────────────────
+# What's been skipped vs. the real decoder:
+#   - Gillham altitude (Q=0 branch) — Gray-code path, rarely seen
+#   - Subtypes 3/4 detail
+#   - TC 28 (status) and TC 31 (operational status)
+#   - GNSS-minus-baro altitude difference
+#   - NAC_v, NIC supplement, surveillance bits
+#   - Surface position (TC 5–8)
+#   - The fleet dict, ageing, table rendering, network I/O

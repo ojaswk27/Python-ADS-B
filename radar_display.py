@@ -4,6 +4,9 @@ ADS-B Radar Display
 ===================
 Live PPI radar receiver — rotating sweep, fading trails, track panel.
 
+The window is resizable and the whole radar (disc, blips, labels, fonts)
+scales with it.  F11 toggles fullscreen, Esc leaves it.
+
 Usage
 -----
     python radar_display.py
@@ -26,10 +29,13 @@ from adsb_decoder import Aircraft, decode_message
 
 # ── Radar-specific palette ────────────────────────────────────────────────────
 
-# Blip colours by age since last sweep illumination
-_B_FRESH = "#ffffff"   # 0 – 3 s
-_B_MED   = "#888888"   # 3 – 10 s
-_B_OLD   = "#444444"   # 10 – 30 s
+# Each target gets its own random colour (assigned on first sight) so crossing
+# tracks stay distinguishable.  Recency is shown by fading that colour's
+# brightness with age since the last message, rather than by changing hue.
+def _age_fade(age):
+    if age < 3:    return 1.00   # 0 – 3 s  : full brightness
+    if age < 10:   return 0.70   # 3 – 10 s
+    return 0.45                  # 10 – 30 s (older than 30 s is culled)
 
 # Trail dots, newest to oldest
 _TRAIL = ["#444444", "#3a3a3a", "#303030", "#262626",
@@ -49,18 +55,25 @@ class App(tk.Tk):
         super().__init__()
         self.title("Radar Display")
         self.configure(bg=ui.PANEL)
-        self.resizable(False, False)
+        self.resizable(True, True)
+        self.minsize(round(420 * ui.SCALE), round(360 * ui.SCALE))
 
         self.c_lat, self.c_lon, self.rng = c_lat, c_lon, rng
         self._tick = time.monotonic()
+        self._cw = self._ch = ui.CANVAS_SZ      # live canvas size (autoscale)
+        self._fullscreen = False
 
         self._fleet:    dict[str, Aircraft] = {}
         self._history:  dict[str, deque]   = {}
         self._last_rx:  dict[str, float]   = {}   # monotonic time of last message
+        self._colors:   dict[str, str]     = {}   # icao → random blip colour
         self._lock      = threading.Lock()
         self._rx_status = "joining…"
+        self._bg_sig    = None    # view signature the cached rings were drawn for
 
         self._build_ui()
+        self.bind("<F11>",    self._toggle_fullscreen)
+        self.bind("<Escape>", self._exit_fullscreen)
         threading.Thread(target=self._rx_loop,
                          args=(group, port, iface), daemon=True).start()
         self._loop()
@@ -68,15 +81,27 @@ class App(tk.Tk):
     # ── coordinate helper ─────────────────────────────────────────────────────
 
     def _to_xy(self, lat, lon):
-        cx, cy, r = ui.geom()
+        cx, cy, r = ui.geom(self._cw, self._ch)
         return ui.ll_to_xy(lat, lon, cx, cy, r, self.c_lat, self.c_lon, self.rng)
+
+    def _on_resize(self, ev):
+        self._cw, self._ch = ev.width, ev.height
+
+    def _toggle_fullscreen(self, _ev=None):
+        self._fullscreen = not self._fullscreen
+        self.attributes("-fullscreen", self._fullscreen)
+
+    def _exit_fullscreen(self, _ev=None):
+        self._fullscreen = False
+        self.attributes("-fullscreen", False)
 
     # ── UI ────────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
         self.cv = tk.Canvas(self, width=ui.CANVAS_SZ, height=ui.CANVAS_SZ,
                             bg=ui.BG, highlightthickness=0, cursor="none")
-        self.cv.pack(side=tk.LEFT)
+        self.cv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.cv.bind("<Configure>", self._on_resize)
 
         p = ui.make_panel(self)
 
@@ -94,6 +119,10 @@ class App(tk.Tk):
         self._track_box.tag_configure("val", foreground="#888888")
         self._track_box.tag_configure("dim", foreground="#444444")
 
+        ui.flat_button(p, "Clear screen", self._clear,
+                       bg=ui.BTN_RED, fg="#ffffff", active=ui.BTN_RED_A
+                       ).pack(fill=tk.X, padx=ui.PAD, pady=(ui.PAD2, 0))
+
         ui.sep(p)
         tk.Label(p, text="RADAR", bg=ui.PANEL, fg=ui.FG,
                  font=ui.F_MD, anchor="w").pack(fill=tk.X, padx=ui.PAD)
@@ -104,16 +133,23 @@ class App(tk.Tk):
         ui.entry_row(p, "lat",      self._v_clat)
         ui.entry_row(p, "lon",      self._v_clon)
         ui.entry_row(p, "range nm", self._v_rng)
-        tk.Button(p, text="Apply", command=self._apply,
-                  bg=ui.BTN, fg=ui.FG, activebackground=ui.BTN_ACT,
-                  font=ui.F_MD, relief=tk.FLAT, bd=0, cursor="hand2"
-                  ).pack(fill=tk.X, padx=ui.PAD, pady=ui.PAD)
+        ui.flat_button(p, "Apply", self._apply
+                       ).pack(fill=tk.X, padx=ui.PAD, pady=ui.PAD)
 
         ui.sep(p)
         self._v_status = tk.StringVar(value="—")
         tk.Label(p, textvariable=self._v_status, bg=ui.PANEL, fg=ui.FG_DIM,
                  font=ui.F_SM, justify=tk.LEFT, anchor="w"
                  ).pack(fill=tk.X, padx=ui.PAD)
+
+    def _clear(self):
+        """Drop all tracked aircraft, trails, and colours; the RX thread
+        repopulates the screen as fresh messages arrive."""
+        with self._lock:
+            self._fleet.clear()
+            self._history.clear()
+            self._last_rx.clear()
+            self._colors.clear()
 
     def _apply(self):
         try:
@@ -137,6 +173,7 @@ class App(tk.Tk):
                 self._fleet.pop(icao, None)
                 self._history.pop(icao, None)
                 self._last_rx.pop(icao, None)
+                self._colors.pop(icao, None)
 
             for icao, ac in self._fleet.items():
                 if ac.lat is None:
@@ -162,11 +199,21 @@ class App(tk.Tk):
 
     def _draw(self, fleet, history, illum):
         cv = self.cv
-        cv.delete("all")
-        cx, cy, r = ui.geom()
-        ui.draw_radar_frame(cv, cx, cy, r, self.rng, self.c_lat, self.c_lon)
+        cx, cy, r = ui.geom(self._cw, self._ch)
+        sf = ui.scale_for(self._cw, self._ch)
 
-        td = ui.TRAIL_DOT
+        # Static rings — cached; only redrawn when the view changes.
+        sig = (round(self.c_lat, 6), round(self.c_lon, 6),
+               round(self.rng, 3), self._cw, self._ch)
+        if sig != self._bg_sig:
+            cv.delete("bg")
+            ui.draw_radar_frame(cv, cx, cy, r, self.rng, self.c_lat, self.c_lon,
+                                sf, tag="bg")
+            self._bg_sig = sig
+
+        # Dynamic trails + blips, recreated each frame (recreated last → on top).
+        cv.delete("fg")
+        td = ui.TRAIL_DOT * sf
         for icao, pts in history.items():
             if illum.get(icao, 999.0) > 30.0:
                 continue
@@ -175,7 +222,7 @@ class App(tk.Tk):
                 if pt:
                     c = _TRAIL[min(i, len(_TRAIL) - 1)]
                     cv.create_oval(pt[0]-td, pt[1]-td, pt[0]+td, pt[1]+td,
-                                   fill=c, outline="")
+                                   fill=c, outline="", tags="fg")
 
         for icao, ac in fleet.items():
             if ac.lat is None:
@@ -185,23 +232,33 @@ class App(tk.Tk):
                 continue
             pt = self._to_xy(ac.lat, ac.lon)
             if pt:
-                self._blip(cv, pt[0], pt[1], ac, age)
+                self._blip(cv, pt[0], pt[1], ac, age, sf)
 
-    def _blip(self, cv, x, y, ac, age):
-        col = _B_FRESH if age < 3 else (_B_MED if age < 10 else _B_OLD)
+    def _color(self, icao):
+        """Return this target's persistent random colour, assigning one if new."""
+        col = self._colors.get(icao)
+        if col is None:
+            col = self._colors[icao] = ui.random_color()
+        return col
+
+    def _blip(self, cv, x, y, ac, age, sf=1.0):
+        col = ui.shade(self._color(ac.icao), _age_fade(age))
         hdg = math.radians(ac.track if ac.track is not None else
                            (ac.heading or 0.0))
-        ui.draw_blip(cv, x, y, hdg, col)
+        ui.draw_blip(cv, x, y, hdg, col, sf, tag="fg")
         cs  = (ac.callsign or ac.icao).strip()
         alt = f"FL{ac.altitude//100:03d}" if ac.altitude else "???"
-        cv.create_text(x + ui.LBL_DX, y - ui.LBL_DY,
-                       text=cs, fill=ui.FG, font=ui.F_BLD, anchor="w")
-        cv.create_text(x + ui.LBL_DX, y - round(2 * ui.SCALE),
-                       text=alt, fill=ui.DIM, font=ui.F_SM, anchor="w")
+        dx, dy = ui.LBL_DX * sf, ui.LBL_DY * sf
+        f_sm = ui.sfont(ui.PT_SM, sf)
+        cv.create_text(x + dx, y - dy,
+                       text=cs, fill=col, font=ui.sfont(ui.PT_MD, sf, bold=True),
+                       anchor="w", tags="fg")
+        cv.create_text(x + dx, y - round(2 * ui.SCALE * sf),
+                       text=alt, fill=ui.DIM, font=f_sm, anchor="w", tags="fg")
         if ac.speed:
-            cv.create_text(x + ui.LBL_DX, y + round(7 * ui.SCALE),
-                           text=f"{ac.speed}kt",
-                           fill=ui.DIM, font=ui.F_SM, anchor="w")
+            cv.create_text(x + dx, y + round(7 * ui.SCALE * sf),
+                           text=f"{ac.speed}kt", tags="fg",
+                           fill=ui.DIM, font=f_sm, anchor="w")
 
     def _update_panel(self, fleet, illum):
         active = [(icao, ac) for icao, ac in sorted(fleet.items())

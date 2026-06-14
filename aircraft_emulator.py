@@ -150,11 +150,11 @@ def build_velocity(icao: str, speed_kt: float, heading_deg: float,
     ew_sign = 1 if v_ew < 0 else 0
     ns_sign = 1 if v_ns < 0 else 0
     if supersonic:
-        ew_mag = min(int(abs(v_ew) / 4) + 1, 1023)
-        ns_mag = min(int(abs(v_ns) / 4) + 1, 1023)
+        ew_mag = min(round(abs(v_ew) / 4) + 1, 1023)
+        ns_mag = min(round(abs(v_ns) / 4) + 1, 1023)
     else:
-        ew_mag = min(int(abs(v_ew)) + 1, 1023)
-        ns_mag = min(int(abs(v_ns)) + 1, 1023)
+        ew_mag = min(round(abs(v_ew)) + 1, 1023)
+        ns_mag = min(round(abs(v_ns)) + 1, 1023)
 
     vr_sign = 1 if vrate_fpm < 0 else 0
     vr_mag  = min(abs(vrate_fpm) // 64 + 1, 511)

@@ -79,10 +79,23 @@ def scale_for(w=None, h=None):
     return max(0.5, min(min(w, h) / CANVAS_SZ, 3.0))
 
 
+_FONT_CACHE: dict = {}
+
 def sfont(base_pt, sf=1.0, bold=False):
-    """Scale a base point size by sf and return a Courier font tuple."""
-    size = max(6, round(base_pt * sf))
-    return ("Courier", size, "bold") if bold else ("Courier", size)
+    """Scale a base point size by sf and return a Courier font tuple.
+
+    Cached by (base_pt, rounded sf, bold) so the per-frame draw doesn't keep
+    materialising the same tuple — Tk re-parses it into an internal font handle
+    on every call to create_text, and the canvas hits create_text once per
+    blip per text label per frame.
+    """
+    key = (base_pt, round(sf, 2), bold)
+    f = _FONT_CACHE.get(key)
+    if f is None:
+        size = max(6, round(base_pt * sf))
+        f = ("Courier", size, "bold") if bold else ("Courier", size)
+        _FONT_CACHE[key] = f
+    return f
 
 
 # ── Geometry ──────────────────────────────────────────────────────────────────

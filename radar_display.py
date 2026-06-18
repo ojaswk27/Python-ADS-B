@@ -70,6 +70,7 @@ class App(tk.Tk):
         self._lock      = threading.Lock()
         self._rx_status = "joining…"
         self._bg_sig    = None    # view signature the cached rings were drawn for
+        self._fg_sig    = None    # dynamic-state signature the fg layer was drawn for
 
         self._build_ui()
         self.bind("<F11>",    self._toggle_fullscreen)
@@ -150,6 +151,7 @@ class App(tk.Tk):
             self._history.clear()
             self._last_rx.clear()
             self._colors.clear()
+        self._fg_sig = None        # force the now-empty fg layer to redraw once
 
     def _apply(self):
         try:
@@ -210,8 +212,30 @@ class App(tk.Tk):
             ui.draw_radar_frame(cv, cx, cy, r, self.rng, self.c_lat, self.c_lon,
                                 sf, tag="bg")
             self._bg_sig = sig
+            self._fg_sig = None    # bg rebuild → force fg recreation
 
-        # Dynamic trails + blips, recreated each frame (recreated last → on top).
+        # Dynamic trails + blips — only redraw when the visible state changes.
+        # The age buckets (<3 s, <10 s, <30 s) only matter at their boundaries,
+        # so quantising age to those buckets in the signature lets the cache
+        # hold across sub-second-but-not-bucket-crossing frames.
+        def bucket(age):
+            return 0 if age < 3 else (1 if age < 10 else (2 if age < 30 else 3))
+        fg_sig = (
+            tuple((i, bucket(illum.get(i, 999.0)),
+                   None if a.lat is None else round(a.lat, 5),
+                   None if a.lon is None else round(a.lon, 5),
+                   round((a.track if a.track is not None else (a.heading or 0.0)), 1),
+                   a.altitude, a.speed,
+                   (a.callsign or "").strip())
+                  for i, a in fleet.items()),
+            tuple((i, tuple((round(la, 5), round(lo, 5)) for la, lo in pts))
+                  for i, pts in history.items()),
+            round(sf, 2),
+        )
+        if fg_sig == self._fg_sig:
+            return
+        self._fg_sig = fg_sig
+
         cv.delete("fg")
         td = ui.TRAIL_DOT * sf
         for icao, pts in history.items():

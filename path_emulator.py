@@ -61,6 +61,10 @@ _LBL     = "#aaaaaa"
 # stays uniform regardless of mouse polling rate or drag speed.
 _DRAW_SPACING_PX = round(9 * ui.SCALE)
 
+# Cursor crosshair arm length (px, before scale_for).  Short so each mouse
+# move only invalidates a small region of canvas, not two disc-spanning lines.
+_CURSOR_ARM_PX = 22 * ui.SCALE
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -190,6 +194,7 @@ class App(tk.Tk):
         self._cw = self._ch = ui.CANVAS_SZ      # live canvas size (autoscale)
         self._fullscreen = False
         self._cursor = None                     # (x, y, lat, lon) under pointer
+        self._cursor_on = True                  # crosshair visibility (right-click toggles)
 
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         self._sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)
@@ -214,6 +219,7 @@ class App(tk.Tk):
         self._dirty     = True
         self._bg_sig    = None    # view signature the cached background was drawn for
         self._routes_dirty = True # rebuild route polylines on next frame
+        self._fg_sig    = None    # snapshot of dynamic state the fg layer was drawn for
 
         self._build_ui()
         self.bind("<F11>",    self._toggle_fullscreen)
@@ -333,7 +339,8 @@ class App(tk.Tk):
         hint = ("click     → add point\n"
                 "drag      → draw path\n"
                 "drag dot  → move point\n"
-                "R-click   → delete point\n"
+                "R-click   → delete point /\n"
+                "            toggle crosshair\n"
                 "loop ☐    → close path")
         tk.Label(p, text=hint, bg=ui.PANEL, fg="#333333",
                  font=ui.F_SM, justify=tk.LEFT, anchor="w"
@@ -423,6 +430,8 @@ class App(tk.Tk):
         self._cw, self._ch = ev.width, ev.height
 
     def _rclick(self, ev):
+        # Right-click on a waypoint deletes it; on empty space it toggles the
+        # cursor crosshair on/off.
         hit = self._nearest_wp(ev.x, ev.y)
         if hit:
             ac, i = hit
@@ -430,6 +439,8 @@ class App(tk.Tk):
                 if i < len(ac.waypoints):
                     ac.waypoints.pop(i)
             self._dirty = self._routes_dirty = True
+        else:
+            self._cursor_on = not self._cursor_on
 
     # ── aircraft mgmt ─────────────────────────────────────────────────────────
 
@@ -563,6 +574,7 @@ class App(tk.Tk):
                                 tag="bg")
             self._bg_sig = sig
             self._routes_dirty = True          # reproject routes for new view
+            self._fg_sig = None                # bg rebuild → force fg recreation
 
         with self._lock:
             snap = [(ac, list(ac.waypoints), ac.lat, ac.lon, ac.heading())
@@ -575,20 +587,48 @@ class App(tk.Tk):
                 self._draw_route(cv, ac, wps, cx, cy, r, sf)
             self._routes_dirty = False
 
-        # ── Layer 3: blips, labels, cursor — every frame (they move) ─────────
-        # Recreated last each frame, so they naturally stack above bg/route;
+        # ── Layer 3: blips, labels, cursor — only when something moved ───────
+        # Recreated last each frame so they naturally stack above bg/route;
         # route is rebuilt whenever bg is, so the bg<route<fg order always holds.
-        cv.delete("fg")
-        for ac, wps, lat, lon, hdg in snap:
-            self._draw_target(cv, ac, lat, lon, hdg, sf)
-        self._draw_cursor(cv, cx, cy, r, sf)
+        # Skip the whole delete+recreate when the dynamic state is byte-identical
+        # to the previous frame (idle aircraft, no cursor movement).
+        fg_sig = self._fg_signature(snap, sf)
+        if fg_sig != self._fg_sig:
+            cv.delete("fg")
+            for ac, wps, lat, lon, hdg in snap:
+                self._draw_target(cv, ac, lat, lon, hdg, sf)
+            self._draw_cursor(cv, cx, cy, r, sf)
+            self._fg_sig = fg_sig
+
+    def _fg_signature(self, snap, sf):
+        """Cheap hash of everything the fg layer depends on."""
+        # round lat/lon to ~1m (5 dp) to avoid trivial-position-flip redraws
+        ac_sig = tuple(
+            (id(ac), ac.alt_ft, round(ac.speed_kt, 1),
+             None if lat is None else round(lat, 5),
+             None if lon is None else round(lon, 5),
+             round(hdg, 1))
+            for ac, _wps, lat, lon, hdg in snap
+        )
+        cur = (self._cursor_on,
+               None if self._cursor is None else
+               (self._cursor[0], self._cursor[1]))   # px ints already
+        return (ac_sig, cur, round(sf, 2),
+                id(self._selected))                  # selection drives label colour
 
     def _draw_cursor(self, cv, cx, cy, r, sf):
-        if not self._cursor:
+        """Short toggleable crosshair around the cursor.
+
+        The arms span only ±_CURSOR_ARM_PX (scaled) instead of the full disc, so
+        every mouse-move only dirties a small rectangle around the pointer
+        rather than two disc-spanning strips of canvas.
+        """
+        if not (self._cursor_on and self._cursor):
             return
         x, y, lat, lon = self._cursor
-        cv.create_line(x, cy - r, x, cy + r, fill=ui.SEP, tags="fg")
-        cv.create_line(cx - r, y, cx + r, y, fill=ui.SEP, tags="fg")
+        arm = round(_CURSOR_ARM_PX * sf)
+        cv.create_line(x, y - arm, x, y + arm, fill=ui.SEP, tags="fg")
+        cv.create_line(x - arm, y, x + arm, y, fill=ui.SEP, tags="fg")
         o = round(6 * ui.SCALE * sf)
         cv.create_text(x + o, y - o,
                        text=f"{lat:+.4f}  {lon:+.4f}",

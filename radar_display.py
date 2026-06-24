@@ -224,7 +224,10 @@ class App(tk.Tk):
             tuple((i, bucket(illum.get(i, 999.0)),
                    None if a.lat is None else round(a.lat, 5),
                    None if a.lon is None else round(a.lon, 5),
-                   round((a.track if a.track is not None else (a.heading or 0.0)), 1),
+                   # None encodes "no heading yet" so the cache catches the
+                   # None → 0.0 transition (true-North track is otherwise indistinct).
+                   None if (a.track is None and a.heading is None)
+                        else round((a.track if a.track is not None else a.heading), 1),
                    a.altitude, a.speed,
                    (a.callsign or "").strip())
                   for i, a in fleet.items()),
@@ -267,9 +270,14 @@ class App(tk.Tk):
 
     def _blip(self, cv, x, y, ac, age, sf=1.0):
         col = ui.shade(self._color(ac.icao), _age_fade(age))
-        hdg = math.radians(ac.track if ac.track is not None else
-                           (ac.heading or 0.0))
-        ui.draw_blip(cv, x, y, hdg, col, sf, tag="fg")
+        hdg_deg = ac.track if ac.track is not None else ac.heading
+        if hdg_deg is None:
+            # Position received but no velocity message yet — render a circle
+            # so we don't fake a heading (the old code defaulted to 0° = North).
+            r = ui.BLIP_SZ * sf
+            cv.create_oval(x-r, y-r, x+r, y+r, fill=col, outline="", tags="fg")
+        else:
+            ui.draw_blip(cv, x, y, math.radians(hdg_deg), col, sf, tag="fg")
         cs  = (ac.callsign or ac.icao).strip()
         alt = f"FL{ac.altitude//100:03d}" if ac.altitude else "???"
         dx, dy = ui.LBL_DX * sf, ui.LBL_DY * sf

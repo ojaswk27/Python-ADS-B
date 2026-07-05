@@ -38,7 +38,9 @@ import threading
 import time
 import tkinter as tk
 
+import adsb_source
 import iff_scanner
+import net_config
 import radar_ui as ui
 
 
@@ -216,9 +218,29 @@ class App(tk.Tk):
         self._build_ui()
         self.bind("<F11>",    self._toggle_fullscreen)
         self.bind("<Escape>", self._exit_fullscreen)
-        # Open the IFF scanner as a Toplevel sharing this sim's aircraft list.
-        self.scanner = iff_scanner.ScannerWindow(self)
+        # IFF radar scanner — same window: shares this canvas and side panel.
+        self.scanner = iff_scanner.Scanner(self, self.cv, self._right_panel)
+        # Wire the UDP endpoints (interrogation input + reply output) using
+        # the shared network.cfg.  Failures here are non-fatal — the sim runs
+        # standalone if no other endpoint is reachable.
+        self._netcfg = net_config.load()
+        self.scanner.configure_udp(self._netcfg)
+
+        # ADS-B input: subscribe to the multicast feed and mirror decoded
+        # aircraft into our own aircraft list so the scanner interrogates
+        # them alongside simulated targets.
+        self._adsb_source = adsb_source.AdsbSource(
+            self, self._netcfg["group"], self._netcfg["port"],
+            self._netcfg["iface"])
+        self._adsb_source.start()
+
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._loop()
+
+    def _on_close(self):
+        self.scanner.stop()
+        self._adsb_source.stop()
+        self.destroy()
 
     # ── coordinate helpers ────────────────────────────────────────────────────
 
@@ -254,6 +276,15 @@ class App(tk.Tk):
         return b
 
     def _build_ui(self):
+        # Left panel: aircraft authoring.  Packed first → leftmost column.
+        p = ui.make_panel(self, side=tk.LEFT)
+        self._panel = p
+
+        # Right panel: interrogation + tracks + last reply.  Packed with
+        # side=RIGHT so it hugs the right edge regardless of window size.
+        self._right_panel = ui.make_panel(self, side=tk.RIGHT)
+
+        # Canvas fills whatever's between the two side panels.
         self.cv = tk.Canvas(self, width=ui.CANVAS_SZ, height=ui.CANVAS_SZ,
                             bg=ui.BG, cursor="crosshair", highlightthickness=0)
         self.cv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -265,8 +296,6 @@ class App(tk.Tk):
         self.cv.bind("<Motion>",          self._hover)
         self.cv.bind("<Leave>",           lambda _: setattr(self, "_cursor", None))
         self.cv.bind("<Configure>",       self._on_resize)
-
-        p = ui.make_panel(self)
 
         tk.Frame(p, bg=ui.PANEL, height=round(10 * ui.SCALE)).pack()
         tk.Label(p, text="AIRCRAFT", bg=ui.PANEL, fg=ui.FG,
@@ -389,7 +418,10 @@ class App(tk.Tk):
         if hit:
             self._select(hit[0])
             return
-        # 3) Empty space → drop the first point and arm freehand drawing;
+        # 3) A latched scanner blip → select that aircraft (no waypoint placed).
+        if self.scanner.try_select_blip(ev.x, ev.y):
+            return
+        # 4) Empty space → drop the first point and arm freehand drawing;
         #    subsequent drag motion appends more points to the path.
         ll = self._to_ll(ev.x, ev.y)
         if ll:
@@ -477,6 +509,10 @@ class App(tk.Tk):
     def _select(self, ac):
         self._selected = ac
         self._routes_dirty = True   # selection changes route highlight colour
+        # The scanner mirrors selection via a property; flag its table dirty
+        # so the LAST REPLY pane refreshes on the next tick.
+        if hasattr(self, "scanner"):
+            self.scanner._table_dirty = True
         self._v_name.set(f"{ac.icao}  {ac.callsign}")
         self._v_icao.set(ac.icao)
         self._v_call.set(ac.callsign)
@@ -623,6 +659,7 @@ class App(tk.Tk):
 
         self._refresh_list()
         self._draw()
+        self.scanner.tick()        # throttled table flush, age-column ticks
         self.after(50, self._loop)
 
     def _view_sig(self):
@@ -646,6 +683,7 @@ class App(tk.Tk):
             self._bg_sig = sig
             self._routes_dirty = True          # reproject routes for new view
             self._fg_sig = None                # bg rebuild → force fg recreation
+            self.scanner.invalidate_overlay()  # …and the scanner's beam/blip layers
 
         with self._lock:
             snap = [(ac, list(ac.waypoints), ac.lat, ac.lon, ac.heading())
@@ -670,6 +708,17 @@ class App(tk.Tk):
                 self._draw_target(cv, ac, lat, lon, hdg, sf)
             self._draw_cursor(cv, cx, cy, r, sf)
             self._fg_sig = fg_sig
+
+        # ── Layer 4 + 5: scanner sweep wedge + latched blips ────────────────
+        # Drawn every frame so the wedge follows the antenna; the scanner
+        # caches its own beam_sig / blip_sig so most frames no-op.  Reorder
+        # the layers if both tags actually have items (tag_lower/raise error
+        # when either side is empty).
+        self.scanner.draw_overlay(cx, cy, r, sf)
+        if cv.find_withtag("beam") and cv.find_withtag("route"):
+            cv.tag_lower("beam", "route")
+        if cv.find_withtag("blip"):
+            cv.tag_raise("blip")
 
     def _fg_signature(self, snap, sf):
         """Cheap hash of everything the fg layer depends on."""

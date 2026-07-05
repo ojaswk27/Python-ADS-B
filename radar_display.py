@@ -269,7 +269,9 @@ class App(tk.Tk):
         return col
 
     def _blip(self, cv, x, y, ac, age, sf=1.0):
-        col = ui.shade(self._color(ac.icao), _age_fade(age))
+        # Fade the track's colour toward the dim ring-grey (not black) so a
+        # stale blip melts into the scope background rather than punching a hole.
+        col = ui.blend(self._color(ac.icao), ui.DIM, 1.0 - _age_fade(age))
         hdg_deg = ac.track if ac.track is not None else ac.heading
         if hdg_deg is None:
             # Position received but no velocity message yet — render a circle

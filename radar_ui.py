@@ -165,6 +165,20 @@ def shade(hex_color, factor):
     return f"#{int(r * f):02x}{int(g * f):02x}{int(b * f):02x}"
 
 
+def blend(hex_a, hex_b, t):
+    """Linear-interpolate two #rrggbb colours; t=0 → a, t=1 → b."""
+    def _rgb(h):
+        h = h.lstrip("#")
+        return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+    ra, ga, ba = _rgb(hex_a)
+    rb, gb, bb = _rgb(hex_b)
+    t = max(0.0, min(1.0, t))
+    r = int(ra + (rb - ra) * t)
+    g = int(ga + (gb - ga) * t)
+    b = int(ba + (bb - ba) * t)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
 # ── Widget helpers ────────────────────────────────────────────────────────────
 
 
@@ -252,10 +266,10 @@ def flat_button(parent, text, command, bg=BTN, fg=FG, active=None):
     return b
 
 
-def make_panel(root):
-    """Create and pack the right-side panel Frame. Returns the Frame."""
+def make_panel(root, side=tk.LEFT):
+    """Create and pack a fixed-width side panel Frame.  Returns the Frame."""
     p = tk.Frame(root, bg=PANEL, width=PANEL_W)
-    p.pack(side=tk.LEFT, fill=tk.Y)
+    p.pack(side=side, fill=tk.Y)
     p.pack_propagate(False)
     return p
 

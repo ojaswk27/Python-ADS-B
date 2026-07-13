@@ -2,10 +2,12 @@
 Shared network configuration loader.
 
 Reads network.cfg (KEY = VALUE, # comments) from the same directory as this
-file.  Returns a dict with keys 'group', 'port', 'iface' (ADS-B multicast) and
-'asterix_host', 'asterix_port' (CAT021 / radar-position unicast output).
-Missing or unreadable config files are silently ignored — callers fall back to
-their own hard-coded defaults.
+file.  Returns a dict covering: ADS-B multicast ('group'/'port'/'iface'),
+ASTERIX CAT021 output ('asterix_host'/'asterix_port'), the external IFF
+interrogation-input and reply-output channels ('iff_interrogation_*',
+'iff_reply_*'), and the private aircraft_sim.py <-> iff_radar.py link
+('ac_channel_int_*', 'ac_channel_rep_*').  Missing or unreadable config files
+are silently ignored — callers fall back to their own hard-coded defaults.
 """
 
 import os
@@ -31,6 +33,16 @@ _DEFAULTS = {
     "iff_reply_port":               "4002",
     "iff_reply_transport":          "multicast",
     "iff_reply_iface":              "127.0.0.1",
+    # Radar → Aircraft channel (per-PRT interrogation packet)
+    "ac_channel_int_host":          "127.0.0.1",
+    "ac_channel_int_port":          "5001",
+    "ac_channel_int_transport":     "unicast",
+    "ac_channel_int_iface":         "127.0.0.1",
+    # Aircraft → Radar channel (per-target reply packet)
+    "ac_channel_rep_host":          "127.0.0.1",
+    "ac_channel_rep_port":          "5002",
+    "ac_channel_rep_transport":     "unicast",
+    "ac_channel_rep_iface":         "127.0.0.1",
 }
 
 
@@ -61,4 +73,12 @@ def load() -> dict:
         "iff_reply_port":               int(cfg["iff_reply_port"]),
         "iff_reply_transport":          cfg["iff_reply_transport"],
         "iff_reply_iface":              cfg["iff_reply_iface"],
+        "ac_channel_int_host":          cfg["ac_channel_int_host"],
+        "ac_channel_int_port":          int(cfg["ac_channel_int_port"]),
+        "ac_channel_int_transport":     cfg["ac_channel_int_transport"],
+        "ac_channel_int_iface":         cfg["ac_channel_int_iface"],
+        "ac_channel_rep_host":          cfg["ac_channel_rep_host"],
+        "ac_channel_rep_port":          int(cfg["ac_channel_rep_port"]),
+        "ac_channel_rep_transport":     cfg["ac_channel_rep_transport"],
+        "ac_channel_rep_iface":         cfg["ac_channel_rep_iface"],
     }

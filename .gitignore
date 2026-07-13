@@ -21,3 +21,6 @@ build/
 .vscode/
 *.swp
 *.swo
+
+# Local-only format documentation (kept off the public repo).
+.formats/

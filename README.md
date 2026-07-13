@@ -183,94 +183,11 @@ asterix_port = 8600
 
 ## Output formats
 
-### ADS-B raw hex (multicast)
-
-dump1090-compatible framing:
-
-```
-*<28-hex-chars>;\n
-```
-
-Example: `*8D4840D6232CC371C32CC0CDDA38;\n`
-
-The 28-character hex string is a 112-bit Mode S Extended Squitter (DF=17):
-
-```
-Bits   1– 5   DF   Downlink Format (17 = ADS-B ES)
-Bits   6– 8   CA   Capability
-Bits   9–32   ICAO 24-bit aircraft address
-Bits  33–88   ME   Extended Squitter payload (56 bits)
-               Bits 33–37 : Type Code (TC)
-Bits  89–112  CRC-24
-```
-
-Type codes the toolkit emits/decodes:
-
-| TC | Message type |
-|---|---|
-| 1–4 | Aircraft Identification (callsign + wake category) |
-| 9–18 | Airborne Position — barometric altitude + CPR lat/lon |
-| 19 | Airborne Velocity — ground speed, track angle, vertical rate |
-| 20–22 | Airborne Position — GNSS altitude + CPR lat/lon |
-
-### ASTERIX CAT021 (unicast)
-
-`path_emulator.py` emits one ASTERIX data block per second to
-`--asterix-host:--asterix-port`. Each block contains one record per active
-target. The encoder lives in `cat21.py` and implements just the items the
-toolkit needs (FSPEC is built automatically from whichever items are present):
-
-| FRN | Data item | Contents |
-|---|---|---|
-| 1 | I021/010 | Data Source Identification (SAC/SIC) |
-| 2 | I021/040 | Target Report Descriptor |
-| 3 | I021/161 | Track Number |
-| 6 | I021/130 | Position in WGS-84 (24-bit lat + 24-bit lon) |
-| 11 | I021/080 | Target Address (24-bit ICAO) |
-| 16 | I021/140 | Geometric Height |
-| 21 | I021/145 | Flight Level |
-| 22 | I021/152 | Magnetic Heading |
-| 26 | I021/160 | Airborne Ground Vector (speed + true track) |
-| 29 | I021/170 | Target Identification (callsign) |
-
-Reference: EUROCONTROL ASTERIX Part 12, Category 021 Ed. 2.x. All multi-byte
-fields are big-endian (network byte order), matching the ASTERIX spec.
-
-### Custom 12-byte radar-position message (unicast)
-
-At startup, `path_emulator.py` sends **8 copies** of a small fixed-layout binary
-message to `--asterix-host:--asterix-port`, **one every 500 ms** for a total of
-4 seconds. This announces the radar's own location to receivers on the same
-unicast channel.
-
-| Offset | Field | Type | Value |
-|---|---|---|---|
-| 0–1 | `size` | `uint16` | always `12` (length of the packet itself) |
-| 2–3 | `messageId` | `uint16` | always `0x1306` |
-| 4–7 | `latitude` | `float32` | radar centre, decimal degrees, WGS-84 |
-| 8–11 | `longitude` | `float32` | radar centre, decimal degrees, WGS-84 |
-
-**Byte order: little-endian.** Both x86 and Raspberry Pi / ARM Linux run
-little-endian, so a receiver written as a plain C struct will read the fields
-directly with no swapping on either platform. With Python's `struct` module the
-format string is `<HHff`.
-
-C-style definition for reference:
-
-```c
-#pragma pack(push, 1)
-typedef struct {
-    uint16_t size;        // = 12
-    uint16_t messageId;   // = 0x1306
-    float    latitude;
-    float    longitude;
-} RadarPositionMsg;       // 12 bytes
-#pragma pack(pop)
-```
-
-The burst is fire-and-forget — there's no ack, no retransmission beyond the
-initial 8 packets. Receivers that come up later won't see it; restart the
-emulator if you need to re-announce.
+`path_emulator.py` emits three UDP streams: a public ADS-B raw hex feed
+(dump1090-compatible framing), an ASTERIX CAT021 target-report block, and a
+short startup burst announcing the radar's own position. Byte-level layouts
+are not included in this README; refer to the source in `cat21.py`,
+`iff_protocol.py`, and `iff_interrogation.py` for the encoded fields.
 
 ---
 

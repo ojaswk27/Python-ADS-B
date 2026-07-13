@@ -1,25 +1,6 @@
 #!/usr/bin/env python3
 """
-ASTERIX CAT021 (ADS-B Target Reports) encoder — minimal subset.
-
-Only the data items needed to convey an emulated airborne target are
-implemented.  Items are emitted in UAP (FRN) order and the FSPEC is built
-automatically from whichever items are present.
-
-Implemented items (FRN → item):
-     1  I021/010  Data Source Identification          (SAC / SIC)
-     2  I021/040  Target Report Descriptor
-     3  I021/161  Track Number
-     6  I021/130  Position in WGS-84 co-ordinates
-    11  I021/080  Target Address (ICAO 24-bit)
-    16  I021/140  Geometric Height
-    21  I021/145  Flight Level
-    22  I021/152  Magnetic Heading
-    26  I021/160  Airborne Ground Vector (speed + true track)
-    29  I021/170  Target Identification (callsign)
-
-All multi-byte fields are big-endian, as ASTERIX is network-byte-order on the
-wire.  Reference: EUROCONTROL ASTERIX Part 12, Category 021, Edition 2.x.
+ASTERIX CAT021 encoder (minimal subset).
 """
 
 import struct

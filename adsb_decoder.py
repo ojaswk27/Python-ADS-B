@@ -1,37 +1,14 @@
 #!/usr/bin/env python3
 """
-ADS-B Decoder
-=============
-Fully manual implementation of 1090 MHz Mode S Extended Squitter decoding.
-Only the Python standard library is used — no external packages.
+ADS-B decoder (pure standard library).
 
 Usage
 -----
     python adsb_decoder.py                     # decode built-in demo messages
-    python adsb_decoder.py --msg <28-HEX>      # decode a single message
-    python adsb_decoder.py --file msgs.txt     # decode newline-separated hex file
-    python adsb_decoder.py --live              # live stream from dump1090 TCP :30002
-    python adsb_decoder.py --multicast         # UDP multicast :30003 (group 239.255.0.1)
-
-Frame structure (112 bits / 28 hex chars)
-------------------------------------------
-  Bits  1–5   : DF  — Downlink Format (17 = ADS-B ES)
-  Bits  6–8   : CA  — Capability
-  Bits  9–32  : ICAO 24-bit aircraft address
-  Bits 33–88  : ME  — Message / Extended Squitter payload (56 bits)
-                  Bits 33–37 : Type Code (TC)
-                  Bits 38–88 : Type-specific data
-  Bits 89–112 : CRC-24
-
-ADS-B message types by Type Code
-----------------------------------
-  TC  1–4  : Aircraft Identification (callsign + wake vortex category)
-  TC  5–8  : Surface Position
-  TC  9–18 : Airborne Position — barometric altitude + CPR lat/lon
-  TC 19    : Airborne Velocity — ground speed or airspeed + heading + V/S
-  TC 20–22 : Airborne Position — GNSS altitude + CPR lat/lon
-  TC 28    : Aircraft Status
-  TC 31    : Operational Status
+    python adsb_decoder.py --msg <HEX>         # decode a single message
+    python adsb_decoder.py --file msgs.txt     # decode newline-separated file
+    python adsb_decoder.py --live              # live TCP stream
+    python adsb_decoder.py --multicast         # UDP multicast stream
 """
 
 import argparse
@@ -120,13 +97,8 @@ def tc_label(tc: int) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Section 4 — Aircraft Identification (TC 1–4)
+# Section 4 — Aircraft Identification
 # ═══════════════════════════════════════════════════════════════════════════════
-#
-# ME layout (56 bits, 0-indexed from MSB of ME):
-#   bits 0-4  : TC
-#   bits 5-7  : Aircraft category (wake vortex)
-#   bits 8-55 : 8 callsign characters x 6 bits each
 
 # 64-character ACS charset: 6-bit index → ASCII character.
 _CHARSET = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ#####_###############0123456789######"
@@ -166,17 +138,6 @@ def decode_identification(msg: str) -> dict:
 # ═══════════════════════════════════════════════════════════════════════════════
 # Section 5 — Altitude decoding
 # ═══════════════════════════════════════════════════════════════════════════════
-#
-# TC 9-18 carries a 12-bit AC field at ME bits 8-19 (message bits 41-52).
-# A zero M-bit is inserted at position 6 to form a 13-bit altcode:
-#   altcode = ((ac >> 6) << 7) | (ac & 0x3F)
-#
-# 13-bit altcode layout (positions 0-12, MSB first):
-#   C1 A1 C2 A2 C4 A4 M B1 Q B2 D2 B4 D4
-#    0  1  2  3  4  5  6  7  8  9 10 11 12
-#
-# M=0, Q=1 → 25-ft linear:   altitude = 25 * N – 1000 ft
-# M=0, Q=0 → Gillham code:   100-ft resolution, Gray-code variant
 
 def _gray2int(n: int) -> int:
     """Convert a Gillham (reflected Gray) code to a plain binary integer."""
@@ -250,22 +211,10 @@ def decode_altitude(msg: str) -> Optional[int]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Section 6 — CPR (Compact Position Reporting) position decoding
+# Section 6 — Position decoding
 # ═══════════════════════════════════════════════════════════════════════════════
-#
-# CPR encodes lat/lon as a 17-bit fractional offset within a lat/lon zone.
-# A single frame is ambiguous — an even/odd pair resolves it.
-#
-# ME layout for airborne position (0-indexed from MSB of 56-bit ME):
-#   bit  21 : F   — CPR format: 0 = even, 1 = odd   → message bit 54
-#   bits 22-38 : CPR latitude  (17 bits)             → message bits 55-71
-#   bits 39-55 : CPR longitude (17 bits)             → message bits 72-88
-#
-# Even frame uses 60 latitude zones (Dlat = 360/60 = 6°).
-# Odd  frame uses 59 latitude zones (Dlat = 360/59 ≈ 6.1°).
-# The coprime pair (59,60) uniquely resolves the zone via the CRT.
 
-_NZ = 15  # ICAO CPR zone parameter (gives 4*NZ = 60 even zones)
+_NZ = 15
 
 def _NL(lat: float) -> int:
     """
@@ -354,29 +303,6 @@ def cpr_resolve(
 # ═══════════════════════════════════════════════════════════════════════════════
 # Section 7 — Airborne Velocity (TC 19)
 # ═══════════════════════════════════════════════════════════════════════════════
-#
-# ME layout (0-indexed from MSB of 56-bit ME):
-#   bits 5-7:   Subtype (1-4)
-#   bits 10-12: NAC_v
-#
-#   Subtypes 1/2 — Ground speed (scale x1 or x4):
-#     bit  13 : v_ew direction  (0=east, 1=west)
-#     bits 14-23 : v_ew magnitude  (actual = value - 1 kt)
-#     bit  24 : v_ns direction  (0=north, 1=south)
-#     bits 25-34 : v_ns magnitude  (actual = value - 1 kt)
-#
-#   Subtypes 3/4 — Airspeed (scale x1 or x4):
-#     bit  13 : heading status  (1=valid)
-#     bits 14-23 : heading raw  (actual = raw * 360/1024 deg)
-#     bit  24 : airspeed type   (0=IAS, 1=TAS)
-#     bits 25-34 : airspeed     (actual = value - 1 kt)
-#
-#   Common trailer:
-#     bit  35 : VR source   (0=GNSS, 1=BARO)
-#     bit  36 : VR sign     (0=climb, 1=descent)
-#     bits 37-45 : VR mag   (actual = (value - 1) * 64 ft/min)
-#     bit  48 : GNSS-baro sign
-#     bits 49-55 : GNSS-baro mag  (actual = (value - 1) * 25 ft)
 
 def decode_velocity(msg: str) -> dict:
     """Decode an Airborne Velocity message (TC 19)."""

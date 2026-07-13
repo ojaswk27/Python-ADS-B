@@ -20,9 +20,9 @@ Controls
 
 Outputs
 -------
-    ADS-B raw hex   → UDP multicast (dump1090 framing)
-    ASTERIX CAT021  → unicast --asterix-host:--asterix-port (1 block/s)
-    Radar position  → 8 × 12-byte messages (msg-id 0x1306), 500 ms apart at start
+    ADS-B raw hex   → UDP multicast
+    ASTERIX CAT021  → unicast --asterix-host:--asterix-port
+    Radar position  → short burst at startup
 
 Usage
 -----
@@ -33,8 +33,10 @@ Usage
 
 import argparse
 import math
+import os
 import socket
 import struct
+import sys
 import threading
 import time
 import tkinter as tk
@@ -43,6 +45,19 @@ import cat21
 import net_config
 import radar_ui as ui
 from aircraft_emulator import build_identification, build_position, build_velocity
+
+
+def _load_magic():
+    d = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".formats")
+    if d not in sys.path:
+        sys.path.insert(0, d)
+    try:
+        import magic  # type: ignore
+        return magic.RADAR_POSITION_MSG_ID
+    except Exception:
+        return 0
+
+_RADAR_POS_MSG_ID = _load_magic()
 
 
 # ── Path-specific palette ─────────────────────────────────────────────────────
@@ -723,12 +738,8 @@ class App(tk.Tk):
                 pass
 
     def _radar_pos_burst(self):
-        """Announce the radar's own position: 8 × 12-byte messages, 500 ms apart.
-
-        Struct (little-endian): uint16 size=12, uint16 msg_id=0x1306,
-        float32 latitude, float32 longitude.
-        """
-        pkt = struct.pack("<HHff", 12, 0x1306, self.c_lat, self.c_lon)
+        """Announce the radar's own position at startup."""
+        pkt = struct.pack("<HHff", 12, _RADAR_POS_MSG_ID, self.c_lat, self.c_lon)
         for _ in range(8):                       # 8 × 500 ms = 4 s
             try:
                 self._asx_sock.sendto(pkt, self._asx_dst)

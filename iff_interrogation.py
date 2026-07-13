@@ -1,25 +1,11 @@
 """
 Incoming IFF interrogation message parser + UDP receiver.
-
-Wire format (big-endian, 26 B total):
-
-    off  size  field
-    0    2     ID              — fixed 0x3301
-    2    2     msg_length      — total packet length (= 26)
-    4    1     mode            — same mapping as iff_protocol MODE_* constants
-    5    14    mode_s_data     — hex payload; interpretation depends on mode
-    19   1     mode_s_long     — 0 = short (bytes 0-6 of mode_s_data used),
-                                 1 = long  (all 14 bytes used)
-    20   5     mode_5_data     — ignored
-    25   1     crypto_op       — ignored
-
-The Mode S address (for Mode S Selective) is extracted from bytes 0-2 of the
-Mode S data field.  If your source encodes the address elsewhere, tell me
-and I'll adjust.
 """
 
+import os
 import socket
 import struct
+import sys
 import threading
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -27,8 +13,17 @@ from typing import Callable, Optional
 import udp_endpoints as udp
 
 
-ID_MAGIC     = 0x3301
-MSG_LEN      = 26
+def _load_magic():
+    d = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".formats")
+    if d not in sys.path:
+        sys.path.insert(0, d)
+    try:
+        import magic  # type: ignore
+        return magic.IFF_INTERROGATION_ID, magic.IFF_INTERROGATION_MSG_LEN
+    except Exception:
+        return 0, 0
+
+ID_MAGIC, MSG_LEN = _load_magic()
 _STRUCT      = struct.Struct(">HHB14sB5sB")
 
 
@@ -42,7 +37,7 @@ class Interrogation:
 
 
 def parse(pkt: bytes) -> Optional[Interrogation]:
-    """Parse a 26-byte packet.  Returns None on any format error."""
+    """Parse an incoming packet.  Returns None on any format error."""
     if len(pkt) < MSG_LEN:
         return None
     try:

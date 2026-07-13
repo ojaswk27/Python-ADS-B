@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-Airspace Simulator
+Aircraft Simulator
 ==================
 Click / drag waypoints on the radar canvas to build flight routes; aircraft
-follow them.  This is the *simulator* — it owns ground truth but does NOT
-broadcast anything on the network.  An interrogating IFF radar scanner opens
-in a second window and reads positions directly from this process under a
-shared lock.
+follow them.  This is the *aircraft side* of the IFF simulation pair — it owns
+aircraft ground truth and IFF state, and answers interrogations received from
+an `iff_radar.py` process over UDP.  It has no knowledge of the radar's beam
+position beyond what each interrogation packet tells it, and it never reads
+the radar's state directly: the two processes only talk over the network.
 
 Forked from path_emulator.py minus all UDP transmit threads, plus per-aircraft
-IFF state (Mode 1/2/3-A squawks, Mode S address, transponder capability flags).
+IFF state (Mode 1/2/3-A squawks, Mode S address, transponder capability flags)
+and the interrogation-reply link to iff_radar.py.
 
 Controls
 --------
@@ -20,28 +22,30 @@ Controls
     loop checkbox       close the path into a loop (off = open path)
     Panel list          select aircraft
     address / callsign  edit ICAO + callsign (Enter or click away to apply)
-    IFF fields          Mode 1, Mode 2, Mode 3/A squawks (octal); Mode S addr
+    IFF fields          Mode 1 (5-bit), Mode 2 / 3-A (12-bit) squawks; Mode S addr
     capability flags    M1 / M2 / M3-A / MC / MS transponder on/off
     alt / speed sliders update altitude / speed live
-    F11 / Esc           toggle / leave fullscreen (radar autoscales)
+    F11 / Esc           toggle / leave fullscreen
 
 Usage
 -----
-    python airspace_sim.py
-    python airspace_sim.py --centre 51.5,-0.5 --range 150 --declination 1.5
+    python aircraft_sim.py
+    python aircraft_sim.py --centre 51.5,-0.5 --range 150 --declination 1.5
 """
 
 import argparse
 import math
 import random
+import socket
 import threading
 import time
 import tkinter as tk
 
 import adsb_source
-import iff_scanner
+import iff_protocol as iff
 import net_config
 import radar_ui as ui
+import udp_endpoints as udp
 
 
 # ── Path-specific palette ─────────────────────────────────────────────────────
@@ -91,8 +95,10 @@ def _new_id():
 class WaypointAircraft:
     """Follows an ordered waypoint list; position interpolated by speed.
 
-    Carries per-aircraft IFF state for the radar scanner:
-      mode1/mode2/mode3a — 12-bit octal squawks
+    Carries per-aircraft IFF state, answered only through the interrogation
+    link to iff_radar.py — never read directly by the radar process:
+      mode1              — 5-bit military mission code (0-31)
+      mode2, mode3a       — 12-bit codes (unit code / civil squawk)
       modes_addr        — 24-bit Mode S address (defaults to int(icao, 16))
       xpdr1/2/3a/c/s    — capability flags; if False, this aircraft does not
                           reply to that interrogation mode (non-cooperative).
@@ -122,7 +128,9 @@ class WaypointAircraft:
         self._mi       = 0
 
         # IFF: random defaults; user can override via the per-aircraft panel.
-        self.mode1      = random.randint(0, 0o7777)
+        # Mode 1 is a 5-bit military mission code (0-31); Mode 2 and Mode 3/A
+        # are both 12-bit (unit code / civil squawk respectively).
+        self.mode1      = random.randint(0, 0o37)
         self.mode2      = random.randint(0, 0o7777)
         self.mode3a     = random.randint(0, 0o7777)
         self.modes_addr = int(self.icao, 16) & 0xFFFFFF
@@ -186,13 +194,124 @@ class WaypointAircraft:
                     self._seg_t = 0.0
                     break
 
+
+# ── Interrogation link ──────────────────────────────────────────────────────────
+
+class InterrogationLink:
+    """Background thread: the aircraft side's only connection to the radar.
+
+    Listens for interrogation packets from iff_radar.py; for each one, tests
+    every local aircraft's own bearing/range against the beam geometry the
+    packet describes (the radar never tells us its ground truth — only its
+    antenna state), checks that aircraft's transponder capability for the
+    requested mode, and — for Mode S Selective — its own 24-bit address
+    against the requested one.  Aircraft that pass send back exactly the
+    field that mode carries; nothing else leaks onto the wire.
+    """
+
+    def __init__(self, sim, cfg):
+        self.sim = sim
+        self._cfg = cfg
+        self._recv_sock = None
+        self._send_sock = None
+        self._send_dst  = None
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+
+    def start(self):
+        try:
+            self._recv_sock = udp.open_recv(
+                self._cfg["ac_channel_int_host"], self._cfg["ac_channel_int_port"],
+                self._cfg["ac_channel_int_transport"], self._cfg["ac_channel_int_iface"])
+            self._recv_sock.settimeout(0.5)
+            self._send_sock, self._send_dst = udp.open_send(
+                self._cfg["ac_channel_rep_host"], self._cfg["ac_channel_rep_port"],
+                self._cfg["ac_channel_rep_transport"], self._cfg["ac_channel_rep_iface"])
+        except OSError as e:
+            print(f"[aircraft_sim] interrogation link failed: {e}")
+            return
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        for s in (self._recv_sock, self._send_sock):
+            if s is not None:
+                try:
+                    s.close()
+                except OSError:
+                    pass
+
+    def _loop(self):
+        while not self._stop.is_set():
+            try:
+                data, _addr = self._recv_sock.recvfrom(4096)
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            try:
+                interro = iff.unpack_interrogation(data)
+            except Exception:
+                continue
+            self._handle(interro)
+
+    def _handle(self, interro):
+        mode    = interro["mode"]
+        half_bw = interro["beam_bw_deg"] / 2.0
+        radar_lat, radar_lon = interro["radar_lat"], interro["radar_lon"]
+
+        with self.sim._lock:
+            snap = [(ac.icao, ac.callsign, ac.lat, ac.lon, ac.alt_ft,
+                     ac.modes_addr, ac.mode1, ac.mode2, ac.mode3a,
+                     ac.has_xpdr(mode))
+                    for ac in self.sim._aircraft]
+
+        for icao, call, lat, lon, alt_ft, msa, m1, m2, m3a, xpdr_ok in snap:
+            if lat is None or lon is None or not xpdr_ok:
+                continue
+            brg, _rng = iff.bearing_range_nm(radar_lat, radar_lon, lat, lon)
+            if abs(iff.angle_diff(brg, interro["beam_az_deg"])) > half_bw:
+                continue
+            if mode == iff.MODE_S_SEL:
+                sel = interro["selective_addr"]
+                if sel is None or msa != sel:
+                    continue
+
+            kw = {}
+            if mode == iff.MODE_1:
+                kw["mission_code"] = m1
+            elif mode == iff.MODE_2:
+                kw["unit_code"] = m2
+            elif mode == iff.MODE_3A:
+                kw["squawk"] = m3a
+            elif mode == iff.MODE_C:
+                kw["alt_ft"] = alt_ft
+            elif mode == iff.MODE_S_AC:
+                kw["modes_addr"] = msa
+            elif mode == iff.MODE_S_SEL:
+                kw["modes_addr"] = msa
+                kw["bds_reg"] = interro["bds_reg"]
+                if interro["bds_reg"] == iff.BDS_CALLSIGN:
+                    kw["callsign"] = call
+            else:
+                continue
+
+            icao_int = int(icao, 16)
+            pkt = iff.encode_target_reply(icao_int, mode, interro["prt_no"],
+                                          lat, lon, **kw)
+            try:
+                self._send_sock.sendto(pkt, self._send_dst)
+            except OSError:
+                pass
+
+
 # ── App ───────────────────────────────────────────────────────────────────────
 
 class App(tk.Tk):
 
     def __init__(self, c_lat, c_lon, rng, declination=0.0):
         super().__init__()
-        self.title("Airspace Simulator")
+        self.title("Aircraft Simulator")
         self.configure(bg=ui.PANEL)
         self.resizable(True, True)
         self.minsize(round(420 * ui.SCALE), round(360 * ui.SCALE))
@@ -218,17 +337,20 @@ class App(tk.Tk):
         self._build_ui()
         self.bind("<F11>",    self._toggle_fullscreen)
         self.bind("<Escape>", self._exit_fullscreen)
-        # IFF radar scanner — same window: shares this canvas and side panel.
-        self.scanner = iff_scanner.Scanner(self, self.cv, self._right_panel)
-        # Wire the UDP endpoints (interrogation input + reply output) using
-        # the shared network.cfg.  Failures here are non-fatal — the sim runs
-        # standalone if no other endpoint is reachable.
+
+        # Wire the UDP endpoints using the shared network.cfg.  Failures here
+        # are non-fatal — the sim runs standalone if no radar is reachable.
         self._netcfg = net_config.load()
-        self.scanner.configure_udp(self._netcfg)
+
+        # Interrogation link: answers interrogations received from iff_radar.py
+        # over UDP with per-target replies.  This is the ONLY channel through
+        # which the radar process learns anything about these aircraft.
+        self._interrogation_link = InterrogationLink(self, self._netcfg)
+        self._interrogation_link.start()
 
         # ADS-B input: subscribe to the multicast feed and mirror decoded
-        # aircraft into our own aircraft list so the scanner interrogates
-        # them alongside simulated targets.
+        # aircraft into our own aircraft list so they can also answer
+        # interrogations alongside hand-drawn targets.
         self._adsb_source = adsb_source.AdsbSource(
             self, self._netcfg["group"], self._netcfg["port"],
             self._netcfg["iface"])
@@ -238,7 +360,7 @@ class App(tk.Tk):
         self._loop()
 
     def _on_close(self):
-        self.scanner.stop()
+        self._interrogation_link.stop()
         self._adsb_source.stop()
         self.destroy()
 
@@ -276,15 +398,10 @@ class App(tk.Tk):
         return b
 
     def _build_ui(self):
-        # Left panel: aircraft authoring.  Packed first → leftmost column.
+        # Single panel: aircraft authoring.  Canvas fills the rest.
         p = ui.make_panel(self, side=tk.LEFT)
         self._panel = p
 
-        # Right panel: interrogation + tracks + last reply.  Packed with
-        # side=RIGHT so it hugs the right edge regardless of window size.
-        self._right_panel = ui.make_panel(self, side=tk.RIGHT)
-
-        # Canvas fills whatever's between the two side panels.
         self.cv = tk.Canvas(self, width=ui.CANVAS_SZ, height=ui.CANVAS_SZ,
                             bg=ui.BG, cursor="crosshair", highlightthickness=0)
         self.cv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -346,13 +463,15 @@ class App(tk.Tk):
         tk.Label(p, text="IFF", bg=ui.PANEL, fg=ui.FG_DIM,
                  font=ui.F_MD, anchor="w").pack(fill=tk.X, padx=ui.PAD)
 
-        # Squawk fields (octal, 4 digits) + Mode S address (24-bit hex, 6 digits)
+        # Mode 1 is a 5-bit mission code (octal, 2 digits); Mode 2 is a 12-bit
+        # unit code; Mode 3/A is the 12-bit civil squawk.  Both are 4-digit
+        # octal.  Mode S address is 24-bit hex.
         self._v_m1   = tk.StringVar()
         self._v_m2   = tk.StringVar()
         self._v_m3a  = tk.StringVar()
         self._v_msa  = tk.StringVar()
-        e_m1  = ui.entry_row(p, "M1 sqwk",  self._v_m1)
-        e_m2  = ui.entry_row(p, "M2 sqwk",  self._v_m2)
+        e_m1  = ui.entry_row(p, "M1 code",  self._v_m1)
+        e_m2  = ui.entry_row(p, "M2 code",  self._v_m2)
         e_m3a = ui.entry_row(p, "M3A sqwk", self._v_m3a)
         e_msa = ui.entry_row(p, "MS addr",  self._v_msa)
         for e in (e_m1, e_m2, e_m3a, e_msa):
@@ -418,10 +537,7 @@ class App(tk.Tk):
         if hit:
             self._select(hit[0])
             return
-        # 3) A latched scanner blip → select that aircraft (no waypoint placed).
-        if self.scanner.try_select_blip(ev.x, ev.y):
-            return
-        # 4) Empty space → drop the first point and arm freehand drawing;
+        # 3) Empty space → drop the first point and arm freehand drawing;
         #    subsequent drag motion appends more points to the path.
         ll = self._to_ll(ev.x, ev.y)
         if ll:
@@ -509,18 +625,15 @@ class App(tk.Tk):
     def _select(self, ac):
         self._selected = ac
         self._routes_dirty = True   # selection changes route highlight colour
-        # The scanner mirrors selection via a property; flag its table dirty
-        # so the LAST REPLY pane refreshes on the next tick.
-        if hasattr(self, "scanner"):
-            self.scanner._table_dirty = True
         self._v_name.set(f"{ac.icao}  {ac.callsign}")
         self._v_icao.set(ac.icao)
         self._v_call.set(ac.callsign)
         self._v_alt.set(ac.alt_ft)
         self._v_spd.set(int(ac.speed_kt))
         self._v_loop.set(ac.loop)
-        # IFF fields
-        self._v_m1.set(f"{ac.mode1:04o}")
+        # IFF fields.  Mode 1 is 5-bit (2-digit octal); Mode 2 / 3-A are
+        # 12-bit (4-digit octal).
+        self._v_m1.set(f"{ac.mode1:02o}")
         self._v_m2.set(f"{ac.mode2:04o}")
         self._v_m3a.set(f"{ac.mode3a:04o}")
         self._v_msa.set(f"{ac.modes_addr:06X}")
@@ -590,10 +703,10 @@ class App(tk.Tk):
         ac = self._selected
         if not ac:
             return
-        def parse_oct(s, fallback):
+        def parse_oct(s, fallback, max_val):
             try:
                 v = int(s.strip(), 8)
-                return v if 0 <= v <= 0o7777 else fallback
+                return v if 0 <= v <= max_val else fallback
             except ValueError:
                 return fallback
         def parse_hex(s, fallback):
@@ -603,12 +716,12 @@ class App(tk.Tk):
             except ValueError:
                 return fallback
         with self._lock:
-            ac.mode1      = parse_oct(self._v_m1.get(),  ac.mode1)
-            ac.mode2      = parse_oct(self._v_m2.get(),  ac.mode2)
-            ac.mode3a     = parse_oct(self._v_m3a.get(), ac.mode3a)
+            ac.mode1      = parse_oct(self._v_m1.get(),  ac.mode1,  0o37)
+            ac.mode2      = parse_oct(self._v_m2.get(),  ac.mode2,  0o7777)
+            ac.mode3a     = parse_oct(self._v_m3a.get(), ac.mode3a, 0o7777)
             ac.modes_addr = parse_hex(self._v_msa.get(), ac.modes_addr)
         # Reflect normalised values back into the fields.
-        self._v_m1.set(f"{ac.mode1:04o}")
+        self._v_m1.set(f"{ac.mode1:02o}")
         self._v_m2.set(f"{ac.mode2:04o}")
         self._v_m3a.set(f"{ac.mode3a:04o}")
         self._v_msa.set(f"{ac.modes_addr:06X}")
@@ -659,7 +772,6 @@ class App(tk.Tk):
 
         self._refresh_list()
         self._draw()
-        self.scanner.tick()        # throttled table flush, age-column ticks
         self.after(50, self._loop)
 
     def _view_sig(self):
@@ -683,7 +795,6 @@ class App(tk.Tk):
             self._bg_sig = sig
             self._routes_dirty = True          # reproject routes for new view
             self._fg_sig = None                # bg rebuild → force fg recreation
-            self.scanner.invalidate_overlay()  # …and the scanner's beam/blip layers
 
         with self._lock:
             snap = [(ac, list(ac.waypoints), ac.lat, ac.lon, ac.heading())
@@ -708,17 +819,6 @@ class App(tk.Tk):
                 self._draw_target(cv, ac, lat, lon, hdg, sf)
             self._draw_cursor(cv, cx, cy, r, sf)
             self._fg_sig = fg_sig
-
-        # ── Layer 4 + 5: scanner sweep wedge + latched blips ────────────────
-        # Drawn every frame so the wedge follows the antenna; the scanner
-        # caches its own beam_sig / blip_sig so most frames no-op.  Reorder
-        # the layers if both tags actually have items (tag_lower/raise error
-        # when either side is empty).
-        self.scanner.draw_overlay(cx, cy, r, sf)
-        if cv.find_withtag("beam") and cv.find_withtag("route"):
-            cv.tag_lower("beam", "route")
-        if cv.find_withtag("blip"):
-            cv.tag_raise("blip")
 
     def _fg_signature(self, snap, sf):
         """Cheap hash of everything the fg layer depends on."""
@@ -809,7 +909,7 @@ class App(tk.Tk):
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
-    p = argparse.ArgumentParser(description="Airspace simulator + IFF radar",
+    p = argparse.ArgumentParser(description="Aircraft simulator (IFF sim pair)",
                                 formatter_class=argparse.RawDescriptionHelpFormatter,
                                 epilog=__doc__)
     p.add_argument("--centre", metavar="LAT,LON", default=None)

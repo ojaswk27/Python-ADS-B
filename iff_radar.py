@@ -15,6 +15,12 @@ too; only a Mode S Selective interrogation with the callsign register (BDS
 2,0) ever reveals a callsign.  Nothing is shown before its mode has actually
 been used.
 
+In addition to the interrogation picture, the radar passively receives ADS-B
+broadcasts (the same feed path_emulator.py transmits) and fuses those tracks
+onto the same display.  ADS-B is never interrogated — it is a broadcast, so
+those tracks are drawn as heading-aligned triangles (ADS-B reports track)
+with an "A"-prefixed track number, versus the plain circles used for IFF.
+
 Usage
 -----
     python iff_radar.py
@@ -27,7 +33,9 @@ import socket
 import threading
 import time
 import tkinter as tk
+from datetime import datetime, timezone
 
+import adsb_decoder
 import iff_interrogation as ii
 import iff_protocol as iff
 import net_config
@@ -43,7 +51,8 @@ _DEFAULT_PRT  = 30000    # microseconds (30 ms) — real UDP round trips are
                          # now part of the loop, so this is well above the
                          # old loopback-ground-truth default of 1 ms.
 _MIN_PRT_S    = 0.001
-_BLIP_DECAY_S = 4.0      # latched blip fades toward ring-grey over this long
+_BLIP_DECAY_S = 4.0      # IFF latched blip fades toward ring-grey over this long
+_ADSB_FADE_S  = 5.0      # passively-received ADS-B track fades over this long
 
 _MODE_LABELS = [
     ("Mode 1",            iff.MODE_1),
@@ -114,6 +123,15 @@ class RadarApp(tk.Tk):
         self._tracks_lock = threading.Lock()
         self._target_menu_map: dict[str, int] = {}   # dropdown label -> addr
 
+        # Passive ADS-B surveillance: a completely separate data source from
+        # IFF interrogation.  We just listen to the broadcast (whatever
+        # path_emulator or a real feed sends on the ADS-B multicast group) and
+        # display it fused with the IFF picture.  ADS-B is never interrogated.
+        self._adsb_fleet: dict[str, "adsb_decoder.Aircraft"] = {}
+        self._adsb_lock = threading.Lock()
+        self._adsb_track_no_by_icao: dict[str, int] = {}
+        self._next_adsb_track_no = 1
+
         self._selected_icao = None
         self._table_dirty = False
         self._table_last  = 0.0
@@ -170,9 +188,21 @@ class RadarApp(tk.Tk):
             on_message=self._on_external_interrogation)
         self._interrogation_rx.start()
 
+        # Passive ADS-B receiver: join the ADS-B multicast group and decode
+        # broadcasts into a private fleet for display alongside IFF tracks.
+        self._adsb_sock = None
+        try:
+            self._adsb_sock = udp.open_recv(cfg["group"], cfg["port"],
+                                            "multicast", cfg["iface"])
+            self._adsb_sock.settimeout(0.5)
+        except OSError as e:
+            print(f"[iff_radar] ADS-B receive socket failed: {e}")
+
         self._stop = threading.Event()
         threading.Thread(target=self._tx_loop, daemon=True).start()
         threading.Thread(target=self._rx_loop, daemon=True).start()
+        if self._adsb_sock is not None:
+            threading.Thread(target=self._adsb_rx_loop, daemon=True).start()
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._loop()
@@ -180,7 +210,10 @@ class RadarApp(tk.Tk):
     def _on_close(self):
         self._stop.set()
         self._interrogation_rx.stop()
-        for s in (self._int_send_sock, self._rep_recv_sock, self._reply_sock):
+        for s in (self._int_send_sock, self._rep_recv_sock, self._reply_sock,
+                  self._adsb_sock):
+            if s is None:
+                continue
             try:
                 s.close()
             except OSError:
@@ -484,6 +517,56 @@ class RadarApp(tk.Tk):
             with self._batch_lock:
                 self._current_batch.append(rec)
 
+    # ── ADS-B RX loop (background thread): passive broadcast reception ───────
+
+    def _adsb_rx_loop(self):
+        buf = ""
+        while not self._stop.is_set():
+            try:
+                data, _addr = self._adsb_sock.recvfrom(4096)
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            buf += data.decode("ascii", errors="ignore")
+            while "\n" in buf:
+                line, buf = buf.split("\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    with self._adsb_lock:
+                        adsb_decoder.decode_message(line, self._adsb_fleet)
+                        icao = line.strip("*;")[2:8].upper() if len(line) >= 9 else None
+                        if icao and icao not in self._adsb_track_no_by_icao:
+                            self._adsb_track_no_by_icao[icao] = self._next_adsb_track_no
+                            self._next_adsb_track_no += 1
+                except Exception:
+                    continue
+            self._table_dirty = True
+
+    def _adsb_snapshot(self):
+        """Snapshot displayable ADS-B tracks: list of dicts.  ADS-B position
+        may be unresolved (CPR pair pending) — those are skipped."""
+        now_utc = datetime.now(timezone.utc)
+        out = []
+        with self._adsb_lock:
+            for icao, ac in self._adsb_fleet.items():
+                if ac.lat is None or ac.lon is None:
+                    continue
+                age = ((now_utc - ac.last_seen).total_seconds()
+                       if ac.last_seen is not None else 1e9)
+                hdg = ac.track if ac.track is not None else ac.heading
+                out.append({
+                    "icao": icao,
+                    "trk_no": self._adsb_track_no_by_icao.get(icao, 0),
+                    "lat": ac.lat, "lon": ac.lon, "hdg": hdg,
+                    "callsign": (ac.callsign or "").strip(),
+                    "alt_ft": ac.altitude,
+                    "age": age,
+                })
+        return out
+
     # ── render loop (Tk main thread) ──────────────────────────────────────────
 
     def _loop(self):
@@ -543,37 +626,46 @@ class RadarApp(tk.Tk):
                           fill="#1a1a1a", outline="", style="pieslice", tags="beam")
             self._beam_sig = beam_sig
 
-        # Latched blips: every mode we support delivers position (a
-        # documented sim shortcut standing in for real time-of-flight
-        # ranging) but never heading, so blips are always plain circles,
-        # frozen at the last reply's position and fading toward ring-grey.
+        # Two blip populations on one display:
+        #   IFF (interrogated): plain circles.  Our modes deliver position but
+        #     never heading, so no arrow.  Fade from the last reply over
+        #     _BLIP_DECAY_S.
+        #   ADS-B (passively received): triangles pointing along track, since
+        #     ADS-B does report heading.  Fade by message age over _ADSB_FADE_S.
         now = time.monotonic()
         with self._tracks_lock:
             stale = [icao for icao, trk in self._tracks.items()
                     if now - trk.get("last_ts", 0) > _BLIP_DECAY_S]
             for icao in stale:
                 del self._tracks[icao]
-            live = [(icao, dict(trk)) for icao, trk in self._tracks.items()]
+            iff_live = [(icao, dict(trk)) for icao, trk in self._tracks.items()]
 
-        blip_sig = tuple(
-            (icao, round(trk["last_lat"], 5), round(trk["last_lon"], 5),
-             int((now - trk["last_ts"]) * 8))
-            for icao, trk in live
+        adsb_live = [t for t in self._adsb_snapshot() if t["age"] <= _ADSB_FADE_S]
+
+        blip_sig = (
+            tuple((icao, round(trk["last_lat"], 5), round(trk["last_lon"], 5),
+                   int((now - trk["last_ts"]) * 8))
+                  for icao, trk in iff_live),
+            tuple((t["icao"], round(t["lat"], 5), round(t["lon"], 5),
+                   None if t["hdg"] is None else round(t["hdg"], 1),
+                   int(t["age"] * 4))
+                  for t in adsb_live),
         )
         if blip_sig == self._blip_sig:
             return
         self._blip_sig = blip_sig
 
         cv.delete("blip")
-        for icao, trk in live:
+        rad = ui.BLIP_SZ * sf
+
+        # IFF circles.
+        for icao, trk in iff_live:
             pt = self._to_xy(trk["last_lat"], trk["last_lon"])
             if pt is None:
                 continue
             x, y = pt
-            age = now - trk["last_ts"]
-            col = trk.get("color", ui.FG)
-            faded = ui.blend(col, ui.DIM, min(age / _BLIP_DECAY_S, 1.0))
-            rad = ui.BLIP_SZ * sf
+            faded = ui.blend(trk.get("color", ui.FG), ui.DIM,
+                             min((now - trk["last_ts"]) / _BLIP_DECAY_S, 1.0))
             cv.create_oval(x - rad, y - rad, x + rad, y + rad,
                            fill=faded, outline="", tags="blip")
             label = trk.get("call") or f"TRK{self._track_no_by_icao.get(icao, 0):03d}"
@@ -582,21 +674,54 @@ class RadarApp(tk.Tk):
                            font=ui.sfont(ui.PT_MD, sf, bold=True),
                            anchor="w", tags="blip")
 
+        # ADS-B triangles.
+        for t in adsb_live:
+            pt = self._to_xy(t["lat"], t["lon"])
+            if pt is None:
+                continue
+            x, y = pt
+            faded = ui.blend(self._adsb_color(t["icao"]), ui.DIM,
+                             min(t["age"] / _ADSB_FADE_S, 1.0))
+            if t["hdg"] is None:
+                cv.create_oval(x - rad, y - rad, x + rad, y + rad,
+                               fill=faded, outline="", tags="blip")
+            else:
+                ui.draw_blip(cv, x, y, math.radians(t["hdg"]), faded, sf, tag="blip")
+            label = t["callsign"] or f"A{t['trk_no']:02d}"
+            cv.create_text(x + ui.LBL_DX * sf, y - ui.LBL_DY * sf,
+                           text=label, fill=faded,
+                           font=ui.sfont(ui.PT_MD, sf, bold=True),
+                           anchor="w", tags="blip")
+
+    def _adsb_color(self, icao):
+        """Stable per-ICAO colour for ADS-B tracks."""
+        cache = getattr(self, "_adsb_colors", None)
+        if cache is None:
+            cache = self._adsb_colors = {}
+        col = cache.get(icao)
+        if col is None:
+            col = cache[icao] = ui.random_color()
+        return col
+
     # ── selection ─────────────────────────────────────────────────────────────
 
     def _on_canvas_click(self, ev):
         with self._tracks_lock:
             entries = [(icao, trk["last_lat"], trk["last_lon"])
                        for icao, trk in self._tracks.items()]
+        # ADS-B tracks are keyed with an "A:" prefix so their ICAO can never
+        # collide with an IFF track's sim-envelope ICAO in the selection state.
+        for t in self._adsb_snapshot():
+            entries.append((f"A:{t['icao']}", t["lat"], t["lon"]))
         best, best_d = None, ui.HIT_WP * ui.scale_for(self._cw, self._ch) * 3.0
-        for icao, lat, lon in entries:
+        for key, lat, lon in entries:
             pt = self._to_xy(lat, lon)
             if pt is None:
                 continue
             d = math.hypot(ev.x - pt[0], ev.y - pt[1])
             if d < best_d:
                 best_d = d
-                best = icao
+                best = key
         self._selected_icao = best
         self._table_dirty = True
 
@@ -618,37 +743,54 @@ class RadarApp(tk.Tk):
 
     def _flush_table(self):
         now = time.monotonic()
+        # rows: (rng, key, tag, dict-of-columns)
+        rows = []
         with self._tracks_lock:
-            entries = []
             for icao, trk in self._tracks.items():
                 age = now - trk.get("last_ts", now)
                 if age > _BLIP_DECAY_S:
                     continue
                 brg, rng = iff.bearing_range_nm(self.c_lat, self.c_lon,
                                                 trk["last_lat"], trk["last_lon"])
-                entries.append((rng, icao, dict(trk), brg, age))
+                rows.append((rng, icao, {
+                    "trk":  f"{self._track_no_by_icao.get(icao, 0):03d}",
+                    "call": trk.get("call") or "—",
+                    "addr": f"{trk['modes_addr']:06X}" if "modes_addr" in trk else "—",
+                    "sqwk": f"{trk['sqwk']:04o}"        if "sqwk"       in trk else "—",
+                    "m1":   f"{trk['m1']:02o}"          if "m1"         in trk else "—",
+                    "m2":   f"{trk['m2']:04o}"          if "m2"         in trk else "—",
+                    "alt":  f"FL{trk['alt_ft']//100:03d}" if "alt_ft"   in trk else "—",
+                    "rng":  f"{rng:5.1f}", "brg": f"{brg:3.0f}", "age": f"{age:4.1f}",
+                }))
             self._table_dirty = False
-        entries.sort(key=lambda t: t[0])
+
+        # ADS-B rows — passive source; fills CALL/ADDR/ALT/RNG/BRG only.  The
+        # IFF-only columns (SQWK/M1/M2) stay "—" because ADS-B carries none of
+        # them.  Keyed "A:<icao>" and shown with an A-prefixed track number.
+        for t in self._adsb_snapshot():
+            if t["age"] > _ADSB_FADE_S:
+                continue
+            brg, rng = iff.bearing_range_nm(self.c_lat, self.c_lon, t["lat"], t["lon"])
+            rows.append((rng, f"A:{t['icao']}", {
+                "trk":  f"A{t['trk_no']:02d}",
+                "call": t["callsign"] or "—",
+                "addr": t["icao"],
+                "sqwk": "—", "m1": "—", "m2": "—",
+                "alt":  f"FL{t['alt_ft']//100:03d}" if t["alt_ft"] is not None else "—",
+                "rng":  f"{rng:5.1f}", "brg": f"{brg:3.0f}", "age": f"{t['age']:4.1f}",
+            }))
+
+        rows.sort(key=lambda t: t[0])
 
         self._tbl.config(state=tk.NORMAL)
         self._tbl.delete("1.0", tk.END)
         self._row_icaos = []
-        for rng, icao, trk, brg, age in entries:
-            trk_no = self._track_no_by_icao.get(icao, 0)
-            call = trk.get("call") or "—"
-            addr = f"{trk['modes_addr']:06X}" if "modes_addr" in trk else "—"
-            sqwk = f"{trk['sqwk']:04o}"        if "sqwk"       in trk else "—"
-            m1   = f"{trk['m1']:02o}"          if "m1"         in trk else "—"
-            m2   = f"{trk['m2']:04o}"          if "m2"         in trk else "—"
-            alt  = f"FL{trk['alt_ft']//100:03d}" if "alt_ft"   in trk else "—"
-            row = self._table_row(trk=f"{trk_no:03d}", call=call, addr=addr,
-                                  sqwk=sqwk, m1=m1, m2=m2, alt=alt,
-                                  rng=f"{rng:5.1f}", brg=f"{brg:3.0f}",
-                                  age=f"{age:4.1f}")
-            tag = "sel" if icao == self._selected_icao else "row"
+        for rng, key, col in rows:
+            row = self._table_row(**col)
+            tag = "sel" if key == self._selected_icao else "row"
             self._tbl.insert(tk.END, row + "\n", tag)
-            self._row_icaos.append(icao)
-        if not entries:
+            self._row_icaos.append(key)
+        if not rows:
             self._tbl.insert(tk.END, "  (no tracks)\n", "row")
         self._tbl.config(state=tk.DISABLED)
 
@@ -656,17 +798,35 @@ class RadarApp(tk.Tk):
         self._refresh_detail()
 
     def _refresh_detail(self):
-        icao = self._selected_icao
-        if icao is None:
+        key = self._selected_icao
+        if key is None:
             self._v_detail.set("(click a track on the radar or in the table)")
             return
+        # ADS-B selection: no interrogation reply exists — it's a broadcast, so
+        # show the decoded state instead of a reply hex dump.
+        if isinstance(key, str) and key.startswith("A:"):
+            icao = key[2:]
+            with self._adsb_lock:
+                ac = self._adsb_fleet.get(icao)
+                trk_no = self._adsb_track_no_by_icao.get(icao, 0)
+                if ac is None:
+                    self._v_detail.set(f"A{trk_no:02d}: no ADS-B data")
+                    return
+                call = (ac.callsign or "").strip() or "—"
+                alt  = f"FL{ac.altitude//100:03d}" if ac.altitude is not None else "—"
+                pos  = (f"{ac.lat:+.4f} {ac.lon:+.4f}"
+                        if ac.lat is not None else "—")
+            self._v_detail.set(
+                f"A{trk_no:02d}  ADS-B  {icao}\n"
+                f"call {call}   {alt}\npos  {pos}")
+            return
         with self._tracks_lock:
-            trk = self._tracks.get(icao)
+            trk = self._tracks.get(key)
         if trk is None or "last_raw" not in trk:
-            self._v_detail.set(f"TRK{self._track_no_by_icao.get(icao, 0):03d}: no recent reply")
+            self._v_detail.set(f"TRK{self._track_no_by_icao.get(key, 0):03d}: no recent reply")
             return
         mode_name = iff.MODE_NAMES.get(trk.get("last_mode"), "?")
-        head = f"TRK{self._track_no_by_icao.get(icao, 0):03d}  {mode_name}"
+        head = f"TRK{self._track_no_by_icao.get(key, 0):03d}  {mode_name}"
         self._v_detail.set(head + "\n" + iff.format_hex(trk["last_raw"]))
 
 

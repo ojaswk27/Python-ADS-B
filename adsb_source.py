@@ -11,12 +11,12 @@ dropped.
 """
 
 import socket
-import struct
 import threading
 import time
 
 import adsb_decoder
 import radar_ui as ui
+import udp_endpoints as udp
 
 
 _STALE_S = 60.0
@@ -120,13 +120,10 @@ class AdsbSource:
 
     def start(self):
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            s.bind(("", self._port))
-            mreq = struct.pack("4s4s",
-                               socket.inet_aton(self._group),
-                               socket.inet_aton(self._iface))
-            s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+            # Shared helper joins the group with SO_REUSEADDR + SO_REUSEPORT,
+            # so this coexists with any other subscriber on the same host
+            # (e.g. an iff_radar also reading the ADS-B feed).
+            s = udp.open_recv(self._group, self._port, "multicast", self._iface)
             s.settimeout(0.5)
             self._sock = s
         except OSError as e:

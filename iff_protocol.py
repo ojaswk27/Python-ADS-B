@@ -232,6 +232,30 @@ def unpack_interrogation(pkt: bytes) -> dict:
 
 BDS_CALLSIGN = 0x20   # ICAO Annex 10 BDS register 2,0
 
+# Same 6-bit character alphabet as ADS-B TC=4 / Mode S register 2,0.
+_CALLSIGN_CHARSET = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ#####_###############0123456789######"
+
+
+def pack_callsign_bds20(callsign: str) -> bytes:
+    """Pack an 8-character callsign into the 48-bit (6-byte) content of a
+    BDS 2,0 register — 8 characters at 6 bits each, MSB first, exactly as a
+    real Mode S Aircraft Identification reply carries it."""
+    cs = (callsign or "").upper()[:8]
+    cs = cs + " " * (8 - len(cs))
+    bits = 0
+    for ch in cs:
+        idx = _CALLSIGN_CHARSET.find(ch)
+        bits = (bits << 6) | (idx if idx >= 0 else 0)
+    return bits.to_bytes(6, "big")
+
+
+def unpack_callsign_bds20(reg6: bytes) -> str:
+    """Inverse of pack_callsign_bds20."""
+    bits = int.from_bytes(reg6[:6], "big")
+    chars = [_CALLSIGN_CHARSET[(bits >> (42 - i * 6)) & 0x3F] for i in range(8)]
+    return "".join(chars).replace("#", "").strip()
+
+
 _REPLY_HEAD = struct.Struct(">BHff")   # mode, prt_no, src_lat, src_lon (after the 3 B icao)
 
 
@@ -270,12 +294,14 @@ def encode_target_reply(icao_int: int, mode: int, prt_no: int,
     elif mode == MODE_S_AC:
         payload = (kw["modes_addr"] & 0xFFFFFF).to_bytes(3, "big")
     elif mode == MODE_S_SEL:
+        # addr (3) + BDS code (1) + 48-bit register content (6).  The BDS code
+        # byte + register content together form a real 7-byte BDS 2,0 register.
         addr_b  = (kw["modes_addr"] & 0xFFFFFF).to_bytes(3, "big")
         bds_reg = kw.get("bds_reg", 0)
         if bds_reg == BDS_CALLSIGN:
-            reg = (kw.get("callsign") or "").upper()[:8].ljust(8).encode("ascii", "replace")
+            reg = pack_callsign_bds20(kw.get("callsign"))
         else:
-            reg = b"\x00" * 8
+            reg = b"\x00" * 6
         payload = addr_b + bytes([bds_reg & 0xFF]) + reg
     else:
         raise ValueError(f"unknown mode {mode}")
@@ -304,5 +330,5 @@ def decode_target_reply(pkt: bytes) -> dict:
         bds_reg = payload[3]
         out["bds_reg"] = bds_reg
         if bds_reg == BDS_CALLSIGN:
-            out["callsign"] = payload[4:12].decode("ascii", "replace").strip()
+            out["callsign"] = unpack_callsign_bds20(payload[4:10])
     return out

@@ -24,6 +24,14 @@ def open_recv(host: str, port: int, transport: str, iface: str = "0.0.0.0"):
     """Open a UDP socket ready for recvfrom()."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # SO_REUSEPORT lets several processes on one host subscribe to the same
+    # multicast group/port (e.g. aircraft_sim and iff_radar both reading the
+    # ADS-B feed).  Required on macOS/BSD; harmless where unavailable.
+    if hasattr(socket, "SO_REUSEPORT"):
+        try:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except OSError:
+            pass
     if _is_multicast(transport):
         s.bind(("", port))
         mreq = struct.pack("4s4s",

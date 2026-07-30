@@ -13,7 +13,7 @@ import tkinter as tk
 
 # ── Scale ─────────────────────────────────────────────────────────────────────
 
-SCALE = 1.5  # change this one number to resize everything
+SCALE = 1  # change this one number to resize everything
 
 # ── Palette ───────────────────────────────────────────────────────────────────
 
@@ -266,12 +266,92 @@ def flat_button(parent, text, command, bg=BTN, fg=FG, active=None):
     return b
 
 
-def make_panel(root, side=tk.LEFT):
-    """Create and pack a fixed-width side panel Frame.  Returns the Frame."""
-    p = tk.Frame(root, bg=PANEL, width=PANEL_W)
+def make_panel(root, side=tk.LEFT, width=None):
+    kw = PANEL_W if width is None else width
+    p = tk.Frame(root, bg=PANEL, width=kw)
     p.pack(side=side, fill=tk.Y)
     p.pack_propagate(False)
     return p
+
+
+def make_scroll_panel(root, side=tk.LEFT, width=None):
+    """A fixed-width side panel whose contents scroll vertically.
+
+    Returns the inner Frame to pack children into — callers use it exactly like
+    the Frame from make_panel.  Tk has no scrollable Frame, so this is the
+    standard Canvas-plus-window arrangement.
+
+    The scrollbar appears only when the contents are taller than the panel, so
+    a panel that fits looks and behaves identically to a plain one.
+    """
+    outer = tk.Frame(root, bg=PANEL, width=(PANEL_W if width is None else width))
+    outer.pack(side=side, fill=tk.Y)
+    outer.pack_propagate(False)
+
+    cv = tk.Canvas(outer, bg=PANEL, highlightthickness=0, bd=0, takefocus=0)
+    bar = tk.Scrollbar(
+        outer,
+        orient=tk.VERTICAL,
+        command=cv.yview,
+        bg=PANEL,
+        troughcolor=PANEL,
+        activebackground=BTN_ACT,
+        relief=tk.FLAT,
+        bd=0,
+        width=round(11 * SCALE),
+    )
+    cv.configure(yscrollcommand=bar.set)
+    cv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    inner = tk.Frame(cv, bg=PANEL)
+    win = cv.create_window(0, 0, window=inner, anchor="nw")
+
+    def _overflowing():
+        return inner.winfo_reqheight() > cv.winfo_height()
+
+    def _sync(_ev=None):
+        # Keep the embedded frame exactly as wide as the visible canvas so
+        # fill=tk.X children lay out against the panel width, not their own.
+        cv.itemconfigure(win, width=cv.winfo_width())
+        cv.configure(scrollregion=cv.bbox("all"))
+        if _overflowing():
+            if not bar.winfo_ismapped():
+                # before=cv matters: the canvas is packed with expand=True and
+                # claims the whole cavity, so a bar packed after it gets no
+                # width at all.
+                bar.pack(side=tk.RIGHT, fill=tk.Y, before=cv)
+        elif bar.winfo_ismapped():
+            bar.pack_forget()
+            cv.yview_moveto(0.0)
+
+    inner.bind("<Configure>", _sync)
+    cv.bind("<Configure>", _sync)
+
+    def _wheel(ev):
+        if not _overflowing():
+            return
+        if ev.num == 4:                     # X11 wheel up
+            step = -1
+        elif ev.num == 5:                   # X11 wheel down
+            step = 1
+        else:                               # Windows / macOS
+            step = -1 if ev.delta > 0 else 1
+        cv.yview_scroll(step, "units")
+
+    # Claim the wheel only while the pointer is over this panel, so the radar
+    # canvas keeps it the rest of the time.
+    def _claim(_ev=None):
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            cv.bind_all(seq, _wheel)
+
+    def _release(_ev=None):
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            cv.unbind_all(seq)
+
+    outer.bind("<Enter>", _claim)
+    outer.bind("<Leave>", _release)
+
+    return inner
 
 
 # ── Radar canvas drawing ──────────────────────────────────────────────────────

@@ -122,6 +122,7 @@ class RadarApp(tk.Tk):
         self._known_addrs: dict[str, int] = {}
         self._tracks_lock = threading.Lock()
         self._target_menu_map: dict[str, int] = {}   # dropdown label -> addr
+        self._target_menu_dirty = True
 
         # Passive ADS-B surveillance: a completely separate data source from
         # IFF interrogation.  We just listen to the broadcast (whatever
@@ -373,8 +374,9 @@ class RadarApp(tk.Tk):
         self._ext_status_snap = f"{mode_name}{addr_s}"
 
     def _refresh_target_menu(self):
-        """Populate the selective-target dropdown from addresses actually
-        learned via a Mode S reply.  Called from _flush_table (~5 Hz)."""
+        if not self._target_menu_dirty:
+            return
+        self._target_menu_dirty = False
         menu = self._target_om["menu"]
         with self._tracks_lock:
             entries = list(self._known_addrs.items())
@@ -490,9 +492,11 @@ class RadarApp(tk.Tk):
             elif mode == iff.MODE_S_AC:
                 trk["modes_addr"] = d["modes_addr"]
                 self._known_addrs[icao_env] = d["modes_addr"]
+                self._target_menu_dirty = True
             elif mode == iff.MODE_S_SEL:
                 trk["modes_addr"] = d["modes_addr"]
                 self._known_addrs[icao_env] = d["modes_addr"]
+                self._target_menu_dirty = True
                 if "callsign" in d:
                     trk["call"] = d["callsign"]
 

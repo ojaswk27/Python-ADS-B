@@ -175,6 +175,74 @@ def build_velocity(icao: str, speed_kt: float, heading_deg: float,
     return _sign_crc(f"{header:022X}")
 
 
+# ─── Frame decoder (inverse of the builders above) ────────────────────────────
+#
+# Delegates the bit-picking to adsb_decoder, which already implements the
+# DO-260B field layouts, Gillham/Q-bit altitude, and CPR arithmetic.  This
+# wrapper exists to give the receiver side one entry point that dispatches on
+# Type Code and returns a uniform dict.
+
+def decode_frame(raw) -> dict:
+    """Decode one ADS-B frame produced by build_identification / build_position
+    / build_velocity.  Accepts the 28-char hex string those return, or bytes.
+
+    Returns a dict with "kind" in {"ident", "position", "velocity"} plus the
+    fields that frame type carries.
+
+    Position frames return the RAW CPR pair (cpr_lat, cpr_lon, odd_flag) and
+    NOT a lat/lon.  A single position frame genuinely cannot yield a position —
+    resolving it needs an even/odd pair or a reference position, and that is
+    the receiver's job.  Handing back a lat/lon here is exactly how a simulator
+    ends up hiding the acquisition delay a real receiver cannot avoid.
+
+    Raises ValueError on a frame that is malformed, fails CRC, is not DF17/18,
+    or carries a Type Code this emitter never produces.
+    """
+    import adsb_decoder as dec
+
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.hex().upper()
+    msg = str(raw).strip().upper()
+    if msg.startswith("*"):
+        msg = msg[1:]
+    msg = msg.rstrip(";")
+    if len(msg) != 28:
+        raise ValueError(f"expected a 28-char hex frame, got {len(msg)}")
+    try:
+        int(msg, 16)
+    except ValueError as e:
+        raise ValueError(f"not hex: {msg!r}") from e
+    if not dec.crc_valid(msg):
+        raise ValueError(f"CRC-24 check failed for {msg}")
+
+    df, icao, tc = dec.parse_header(msg)
+    if df not in (17, 18):
+        raise ValueError(f"not an ADS-B extended squitter (DF={df})")
+
+    out = {"icao": icao, "df": df, "tc": tc, "raw": msg}
+
+    if 1 <= tc <= 4:
+        ident = dec.decode_identification(msg)
+        out.update(kind="ident", callsign=ident["callsign"],
+                   category=ident["category"])
+        return out
+
+    if 9 <= tc <= 18 or 20 <= tc <= 22:
+        odd, cpr_lat, cpr_lon = dec.decode_cpr_fields(msg)
+        out.update(kind="position", cpr_lat=cpr_lat, cpr_lon=cpr_lon,
+                   odd_flag=bool(odd), alt_ft=dec.decode_altitude(msg))
+        return out
+
+    if tc == 19:
+        v = dec.decode_velocity(msg)
+        out.update(kind="velocity", speed_kt=v.get("speed"),
+                   track_deg=v.get("track"), vrate_fpm=v.get("vertical_rate"),
+                   subtype=v.get("subtype"))
+        return out
+
+    raise ValueError(f"unsupported type code TC={tc} ({dec.tc_label(tc)})")
+
+
 # ─── Simulated aircraft state ─────────────────────────────────────────────────
 
 @dataclass

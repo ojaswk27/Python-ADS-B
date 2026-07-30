@@ -42,8 +42,32 @@ MODE_NAMES = {
 _CLASSIC_MODES  = (MODE_1, MODE_2, MODE_3A, MODE_C)
 _MODE_S_MODES   = (MODE_S_AC, MODE_S_SEL)
 
+
+def mode_is_s(mode):
+    return mode in _MODE_S_MODES
+
+
+def turnaround_us(mode):
+    return TURNAROUND_S_US if mode_is_s(mode) else TURNAROUND_AC_US
+
+
+def range_to_rtt_us(rng_nm, mode):
+    return rng_nm * RADAR_MILE_US + turnaround_us(mode)
+
+
+def rtt_to_range_nm(rtt_us, mode):
+    rng = (rtt_us - turnaround_us(mode)) / RADAR_MILE_US
+    return round(rng / RANGE_QUANT_NM) * RANGE_QUANT_NM
+
 RANGE_LSB_NM = 1.0 / 128.0
 MAX_TARGETS  = 20
+
+C_M_S            = 299_792_458.0
+NM_M             = 1852.0
+RADAR_MILE_US    = 12.3559        # round-trip microseconds per nautical mile
+TURNAROUND_AC_US = 3.0            # Mode 1/2/3A/C transponder reply delay
+TURNAROUND_S_US  = 128.0          # Mode S DF11/DF4/DF5/DF20/DF21 reply delay
+RANGE_QUANT_NM   = 1.0 / 64.0     # SSR range cell
 
 _RECORD_LEN_CLASSIC = 48
 _RECORD_LEN_MODE_S  = 50
@@ -80,6 +104,85 @@ def decode_mode_c(code: int) -> int:
     sign = -1 if (code >> 11) & 1 else 1
     mag  = code & 0x7FF
     return sign * mag * 25
+
+
+# ── Mode 1 code representation ────────────────────────────────────────────────
+#
+# Mode 1 is a military mission code sent as two pulse groups: A (3 bits, the
+# first octal digit, 0-7) and B (2 bits, the second octal digit, 0-3) — 5 bits
+# and 32 valid codes in total.  Two representations are in play and they are
+# NOT interchangeable:
+#
+#   display form   two octal digits, 0o00 .. 0o73 with the low digit <= 3.
+#                  What the operator types and reads.  Sparse over 0..59.
+#   wire form      the packed 5 bits, 0 .. 31.  What the reply carries.
+#
+# Masking a display-form value with 0x1F silently corrupts everything above
+# 0o37 (0o73 -> 0o33), so the conversion has to be explicit in both directions.
+
+MODE_1_MAX_DISPLAY = 0o73
+
+
+def valid_mode1(v: int) -> bool:
+    """True if v is a legal Mode 1 code in display (octal-digit) form."""
+    return 0 <= v <= MODE_1_MAX_DISPLAY and (v & 0o7) <= 3
+
+
+def mode1_to_wire(v: int) -> int:
+    """Display form (0o00-0o73) -> packed 5-bit wire form (0-31)."""
+    if not valid_mode1(v):
+        raise ValueError(
+            f"illegal Mode 1 code 0o{v:o}: want 00-73 octal with B digit 0-3")
+    return ((v >> 3) << 2) | (v & 0o3)
+
+
+def mode1_from_wire(bits: int) -> int:
+    """Packed 5-bit wire form (0-31) -> display form (0o00-0o73)."""
+    bits &= 0x1F
+    return ((bits >> 2) << 3) | (bits & 0o3)
+
+
+# ── Pressure altitude ─────────────────────────────────────────────────────────
+
+STD_QNH_HPA = 1013.25
+_FT_PER_HPA = 27.0        # near sea level
+
+# Mode C reporting range: -1000 ft to the top of the Gillham code.
+MODE_C_MIN_FT = -1000
+MODE_C_MAX_FT = 126700
+
+
+def encode_mode_c_alt(geo_alt_ft, qnh_hpa=STD_QNH_HPA):
+    """Geometric altitude -> the pressure altitude Mode C actually reports.
+
+    Mode C is Gillham-coded in 100 ft steps and is always referenced to
+    1013.25 hPa, never to the local QNH.  When the local setting differs, the
+    reported figure differs from the aircraft's true height by about 27 ft per
+    hPa — which is exactly why the two readouts should not be expected to
+    agree, and why a sim that reports geometric altitude at 1 ft resolution is
+    telling a comfortable lie.
+    """
+    press_alt = geo_alt_ft + (STD_QNH_HPA - qnh_hpa) * _FT_PER_HPA
+    q = int(round(press_alt / 100.0)) * 100
+    return max(MODE_C_MIN_FT, min(MODE_C_MAX_FT, q))
+
+
+# ── Special-purpose Mode 3/A codes ────────────────────────────────────────────
+
+SQUAWK_HIJACK   = 0o7500
+SQUAWK_RADIO    = 0o7600
+SQUAWK_EMERGENCY = 0o7700
+
+EMERGENCY_SQUAWKS = {
+    SQUAWK_HIJACK:    "HIJACK",
+    SQUAWK_RADIO:     "RADIO FAIL",
+    SQUAWK_EMERGENCY: "EMERGENCY",
+}
+
+
+def emergency_label(squawk):
+    """Name for a special-purpose squawk, or None for an ordinary code."""
+    return EMERGENCY_SQUAWKS.get(squawk)
 
 
 def _pack_classic(t: TargetRecord) -> bytes:
@@ -274,7 +377,7 @@ def _unpack_reply_header(pkt: bytes):
 def encode_target_reply(icao_int: int, mode: int, prt_no: int,
                         src_lat: float, src_lon: float, **kw) -> bytes:
     """Build one per-target reply.  Required kwargs depend on mode:
-      MODE_1     mission_code (5-bit, 0-31)
+      MODE_1     mission_code in display form (0o00-0o73, B digit 0-3)
       MODE_2     unit_code (12-bit)
       MODE_3A    squawk (12-bit)
       MODE_C     alt_ft
@@ -284,7 +387,7 @@ def encode_target_reply(icao_int: int, mode: int, prt_no: int,
     """
     header = _pack_reply_header(icao_int, mode, prt_no, src_lat, src_lon)
     if mode == MODE_1:
-        payload = bytes([kw["mission_code"] & 0x1F])
+        payload = bytes([mode1_to_wire(kw["mission_code"])])
     elif mode == MODE_2:
         payload = struct.pack(">H", kw["unit_code"] & 0xFFF)
     elif mode == MODE_3A:
@@ -308,15 +411,40 @@ def encode_target_reply(icao_int: int, mode: int, prt_no: int,
     return header + payload
 
 
+# Payload length each mode must carry, for validation on decode.
+_PAYLOAD_LEN = {
+    MODE_1:     1,
+    MODE_2:     2,
+    MODE_3A:    2,
+    MODE_C:     2,
+    MODE_S_AC:  3,
+    MODE_S_SEL: 10,   # addr(3) + BDS code(1) + register content(6)
+}
+
+
 def decode_target_reply(pkt: bytes) -> dict:
     """Decode one per-target reply.  Only keys the mode actually carries are
     present — callers must not assume e.g. 'callsign' exists for a Mode 3/A
-    reply."""
+    reply.
+
+    Raises ValueError on a frame that is truncated, carries an unknown mode, or
+    whose payload is the wrong length for its mode.  A malformed frame must not
+    decode to a partial dict: that is how a receiver ends up displaying fields
+    it never actually received.
+    """
+    if len(pkt) < 14:
+        raise ValueError(f"reply too short for a header ({len(pkt)} B, need 14)")
     icao_int, mode, prt_no, src_lat, src_lon, payload = _unpack_reply_header(pkt)
+    if mode not in _PAYLOAD_LEN:
+        raise ValueError(f"unknown mode {mode}")
+    want = _PAYLOAD_LEN[mode]
+    if len(payload) != want:
+        raise ValueError(f"mode {mode} payload is {len(payload)} B, expected {want}")
+
     out = {"icao": icao_int, "mode": mode, "prt_no": prt_no,
-          "src_lat": src_lat, "src_lon": src_lon}
+           "src_lat": src_lat, "src_lon": src_lon}
     if mode == MODE_1:
-        out["mission_code"] = payload[0] & 0x1F
+        out["mission_code"] = mode1_from_wire(payload[0])
     elif mode == MODE_2:
         out["unit_code"] = struct.unpack(">H", payload[:2])[0] & 0xFFF
     elif mode == MODE_3A:

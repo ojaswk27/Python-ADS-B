@@ -84,11 +84,19 @@ class Receiver:
         self._colour_fn = colour_fn
         self.tracks: dict[int, dict] = {}
         self.next_track_no = 1
-        # addr -> "S" (learned from a Mode S reply) or "A" (from ADS-B)
+        # addr -> "S" (Mode S reply), "A" (ADS-B), or "C" (custom 1090 format)
         self.known_addrs: dict[int, str] = {}
         # addr -> {"even": (cpr_lat, cpr_lon, ts), "odd": (...)}
         self._cpr: dict[int, dict] = {}
         self.dirty = False
+        # Custom-format frames that decoded but could not be attributed to an
+        # aircraft, because the config declares no address field.  Counted
+        # rather than dropped silently: it is the visible consequence of
+        # spending all 88 bits without reserving room for an address.
+        self.unattributed = 0
+        # Frames that arrived on 1090 but did not decode under the active
+        # format — a standard ADS-B frame while in custom mode, or vice versa.
+        self.undecodable = 0
 
     # ── store ────────────────────────────────────────────────────────────────
 
@@ -101,6 +109,7 @@ class Receiver:
                 "color":  self._colour_fn(addr) if self._colour_fn else None,
                 "iff":    {},
                 "adsb":   {},
+                "pseudo": {},
                 "plot":   {},
             }
             self.next_track_no += 1
@@ -117,16 +126,24 @@ class Receiver:
         """Drop tracks with no recent frame from either source."""
         stale = [a for a, t in self.tracks.items()
                  if now - max(t["iff"].get("last_ts", 0),
-                              t["adsb"].get("last_ts", 0)) > max_age_s]
+                              t["adsb"].get("last_ts", 0),
+                              t["pseudo"].get("last_ts", 0)) > max_age_s]
         for addr in stale:
             self.forget(addr)
         return stale
 
+    # How informative each way of learning an address is.  A strict ranking
+    # matters: with two sources active the label would otherwise flip back and
+    # forth every frame, and anything keyed on it — the target dropdown — would
+    # rebuild itself continuously.
+    _PROVENANCE_RANK = {"A": 1, "C": 2, "S": 3}
+
     def _learn(self, addr, how):
-        """Record how the address became known.  A Mode S acquisition upgrades
-        an ADS-B-derived entry; the reverse never happens."""
+        """Record how the address became known.  Only ever upgrades, so the
+        value is stable while a track is alive."""
         prev = self.known_addrs.get(addr)
-        if prev == how or (prev == "S" and how == "A"):
+        if prev is not None and \
+                self._PROVENANCE_RANK.get(prev, 0) >= self._PROVENANCE_RANK.get(how, 0):
             return False
         self.known_addrs[addr] = how
         return True
@@ -214,6 +231,68 @@ class Receiver:
             if pos is not None:
                 da["lat"] = (pos[0], t)
                 da["lon"] = (pos[1], t)
+
+        self.dirty = True
+        return trk
+
+    # ── Custom 1090 receive path ─────────────────────────────────────────────
+
+    # Field *names* in the config are the user's choice, so they cannot be used
+    # to work out what a value means.  The declared *source* can: a field fed
+    # from ac.lat is a latitude whatever it is called.  This maps sources onto
+    # the track keys the display already understands.
+    _SOURCE_KEY = {
+        "ac.lat":       "lat",
+        "ac.lon":       "lon",
+        "ac.alt_ft":    "alt_ft",
+        "ac.speed_kt":  "speed_kt",
+        "ac.track":     "track_deg",
+        "ac.heading":   "track_deg",
+        "ac.vrate_fpm": "vrate_fpm",
+        "ac.callsign":  "call",
+        "ac.mode3a":    "sqwk",
+        "ac.mode1":     "m1",
+        "ac.mode2":     "m2",
+    }
+
+    def rx_pseudo(self, frame, t, fmt):
+        """Decode one frame under the custom 1090 format and update its track.
+
+        Returns the track, or None if the frame did not decode under this
+        format or could not be attributed to an aircraft.  Both outcomes are
+        counted so the UI can show them rather than the frame just vanishing.
+        """
+        try:
+            name, values = fmt.decode(frame)
+        except Exception:
+            self.undecodable += 1
+            return None
+
+        addr = fmt.address_of(name, values)
+        if addr is None:
+            self.unattributed += 1
+            return None
+
+        trk = self.track_for(addr)
+        d = trk["pseudo"]
+        d["last_ts"]   = t
+        d["last_type"] = name
+        d["last_raw"]  = frame
+        # Keep the decoded values verbatim for the log and the detail pane,
+        # alongside the spec so each can be formatted by its own field.
+        # Underscored so nothing mistakes these for (value, ts) fields.
+        d["_decoded"] = values
+        d["_spec"] = fmt.messages[name]
+        d["_decoded_ts"] = t
+        self._learn(addr, "C")
+
+        for fld in fmt.messages[name].fields:
+            key = self._SOURCE_KEY.get(fld.source)
+            if key is None:
+                continue
+            v = values.get(fld.name)
+            if v is not None and v != "":
+                d[key] = (v, t)
 
         self.dirty = True
         return trk

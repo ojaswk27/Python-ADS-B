@@ -22,6 +22,7 @@ tests at the repo root; `--no-unit` skips them.
 | `phase3_timing.py` | Per-PRT interrogation (not clamped to the frame rate), hits-per-dwell readout, Mode S lockout and roll-call scheduling |
 | `phase4_pipeline.py` | Aircraft emit frames only, channel range/horizon/loss/delay/garble, measured range and bearing, CPR acquisition, plots from the store |
 | `phase56_fidelity.py` | Mode C pressure altitude and QNH, Mode 1 code range, DO-260B message rates, vertical rate, turn rate, emergency codes and SPI, duplicate-address alert, dropdown stability |
+| `phase8_custom1090.py` | Custom 1090 format end to end: all three transmit modes, custom-only tracks plotting, configured periods honoured, decoded type matching the transmitted type, channel losses logged, a bad config not stopping startup |
 
 ## Two things worth knowing before editing these
 

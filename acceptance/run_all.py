@@ -29,10 +29,11 @@ SUITES = [
     "phase3_timing.py",
     "phase4_pipeline.py",
     "phase56_fidelity.py",
+    "phase8_custom1090.py",
 ]
 
 # Codec round-trips live at the repo root and need no display.
-UNIT = ["test_codecs.py", "test_velocity.py"]
+UNIT = ["test_codecs.py", "test_pseudo1090.py", "test_velocity.py"]
 
 
 def run(path, cwd, verbose):

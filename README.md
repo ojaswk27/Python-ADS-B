@@ -15,15 +15,61 @@ ASTERIX traffic is unicast to a separately configurable destination.
 
 | File | Role |
 |---|---|
+| `simulator.py` | **GUI, single process** — airspace, IFF/SSR interrogator and 1090 MHz receiver in one window. Aircraft emit encoded frames; a channel loses or corrupts them; a receiver builds the whole display by decoding what survives |
+| `channel.py` | Propagation: max range, radio horizon, frame loss, round-trip delay, Mode A/C garble |
+| `receiver.py` | Owns the track store. Measured range and bearing, CPR resolution. No ground-truth access |
+| `pseudo1090.py` + `pseudo1090.cfg` | **Custom 1090 MHz message format** — a config-defined format that replaces ADS-B on the same physical layer, so no new hardware is needed. `--check` validates a config, `--demo` round-trips one |
+| `iff_protocol.py` | IFF reply codec, Mode C pressure altitude, Mode 1 codes, shared geometry |
 | `path_emulator.py` | GUI path editor — draw waypoint routes (or freehand strokes); aircraft fly the paths and the program transmits ADS-B + ASTERIX CAT021 + radar-position UDP |
 | `radar_display.py` | GUI radar receiver — live PPI with fading trails, random per-target colours, track panel |
 | `radar_ui.py` | Shared UI module — palette, fonts, geometry, scale-aware drawing primitives |
 | `adsb_decoder.py` | Pure-stdlib Mode S decoder — single hex, file, dump1090 TCP, or UDP multicast |
-| `aircraft_emulator.py` | Headless scripted fleet emulator (no GUI) |
+| `aircraft_emulator.py` | Headless scripted fleet emulator (no GUI), plus the ADS-B frame builders and `decode_frame` |
 | `cat21.py` | Minimal ASTERIX CAT021 (Target Reports) encoder used by `path_emulator.py` |
 | `net_config.py` | Shared config loader for `network.cfg` |
-| `test_velocity.py` | unittest suite covering velocity-message encode/decode round-trips |
+| `acceptance/` | Suites driving the real application; `python acceptance/run_all.py` |
+| `test_codecs.py`, `test_pseudo1090.py`, `test_velocity.py` | Codec round-trip tests, no display needed |
 | `decoder_pseudocode.txt` | Plain-English walkthrough of the decoder's core for reference |
+
+---
+
+## Custom 1090 MHz format
+
+`simulator.py` can transmit a **custom message format in place of ADS-B**, reusing
+the ADS-B physical layer — same 1090 MHz transceivers, same 112-bit Mode S
+frame, same CRC-24 — so no new hardware is required. Only the payload content
+changes: all 88 bits are defined by `pseudo1090.cfg`.
+
+```
+frame = [ 88 payload bits, defined by the cfg ][ 24-bit CRC ]
+```
+
+Edit `pseudo1090.cfg` to define message types, their bit-field layouts, and
+their transmit periods, then check it without launching the GUI:
+
+```bash
+python pseudo1090.py --check      # layout, bit map, resolutions, all errors at once
+python pseudo1090.py --demo       # encode and decode a sample of each message
+```
+
+Switch formats with the `transmit` control in the **1090 FORMAT** panel:
+
+| Mode | Transmits |
+|---|---|
+| `standard` | DO-260B ADS-B only — the original behaviour, and the shipped default |
+| `custom` | the config's format only, replacing ADS-B entirely |
+| `both` | both, for comparing them side by side on one screen |
+
+The **1090 AIRTIME** pane logs every transmission with its decode result, so a
+frame lost in the channel or rejected by the decoder is visible rather than
+silently absent. `--format-cfg PATH` selects a different config; **Reload
+format cfg** re-reads it without restarting.
+
+Two consequences of owning all 88 bits, both enforced by `--check` rather than
+left to surprise you: with more than one message type the config must declare a
+`type_field`, since nothing else on the wire distinguishes them; and a decoded
+message cannot be tied to an aircraft unless the config says which bits carry
+the address.
 
 ---
 

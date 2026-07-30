@@ -33,12 +33,14 @@ Usage
 
 import argparse
 import math
+import os
 import random
 import time
 import tkinter as tk
 
 import channel
 import iff_protocol as iff
+import pseudo1090
 import radar_ui as ui
 from aircraft_emulator import build_identification, build_position, build_velocity
 from receiver import Receiver
@@ -70,6 +72,10 @@ _LOCKOUT_S = 18.0
 # Ground-truth debug overlay: deliberately drab so it can never be mistaken
 # for a plot.
 _TRUTH_COL = "#334033"
+
+# 1090 MHz airtime log: how many lines to keep.
+_LOG_MAX = 400
+_LOG_LOST_COL = "#7a4a3a"
 
 # Reported-heading turn rate, deg/s.  0 = instant, which is the default: the
 # aircraft reports the segment course as flown, so a waypoint corner produces a
@@ -145,6 +151,26 @@ def _fld_age(d, key, now):
     return None if ent is None else now - ent[1]
 
 
+# Both 1090 formats deliver the same kinds of value, so the display takes the
+# freshest of the two rather than favouring either.  Returns (value, ts, which)
+# or None.  Keys beginning with "_" are internal to a record, never fields.
+_RX_RECORDS = ("adsb", "pseudo")
+
+
+def _rx_field(trk, key, now, limit=_FIELD_STALE_S):
+    best = None
+    for which in _RX_RECORDS:
+        ent = (trk.get(which) or {}).get(key)
+        if not isinstance(ent, tuple) or len(ent) != 2:
+            continue
+        val, ts = ent
+        if (now - ts) > limit:
+            continue
+        if best is None or ts > best[1]:
+            best = (val, ts, which)
+    return best
+
+
 _TRANSITION_ALT_FT = 18000
 
 def fmt_alt(ft):
@@ -180,7 +206,7 @@ class SimAircraft:
                  "climb_fpm", "speed_kt",
                  "loop", "_seg", "_seg_t", "_lat", "_lon", "_hdg",
                  "turn_rate_deg_s",
-                 "_adsb_due", "spi_until",
+                 "_adsb_due", "_pseudo_due", "spi_until",
                  "mode1", "mode2", "mode3a", "modes_addr",
                  "xpdr1", "xpdr2", "xpdr3a", "xpdrC", "xpdrS",
                  "_lockout_until", "_last_sel_scan")
@@ -203,8 +229,9 @@ class SimAircraft:
         # an impossible heading step is a feature, not a defect, so the
         # rate limit is opt-in rather than imposed.
         self.turn_rate_deg_s = _DEFAULT_TURN_RATE
-        # Each ADS-B message type carries its own next-due time (5.3).
+        # Each message type carries its own next-due time (5.3).
         self._adsb_due = {}
+        self._pseudo_due = {}
         self.spi_until = 0.0
         # Mode 1 is stored in display form: A digit 0-7, B digit 0-3.
         self.mode1      = random.randint(0, 7) * 8 + random.randint(0, 3)
@@ -385,6 +412,33 @@ class SimAircraft:
         return iff.encode_target_reply(self.modes_addr, mode, prt_no,
                                        self._lat, self._lon, **kw)
 
+    def pseudo_frame(self, now, fmt):
+        """Emit the next due custom-format frame as (msg_name, hex), or None.
+
+        Same scheduling shape as adsb_frame, but the periods come from the
+        config rather than from DO-260B, which is the "custom time periods"
+        part of the requirement.
+        """
+        if self._lat is None or self._lon is None:
+            return None
+
+        due = None
+        for name, msg in fmt.messages.items():
+            t = self._pseudo_due.get(name)
+            if t is None:
+                # Stagger first emissions so all types are not due at once.
+                self._pseudo_due[name] = now + random.uniform(0.0, msg.period)
+                continue
+            if now >= t and (due is None or t < self._pseudo_due[due]):
+                due = name
+        if due is None:
+            return None
+
+        msg = fmt.messages[due]
+        lo = max(1e-3, msg.period - msg.jitter)
+        self._pseudo_due[due] = now + random.uniform(lo, msg.period + msg.jitter)
+        return due, fmt.encode(due, self)
+
     def adsb_frame(self, now, qnh_hpa=iff.STD_QNH_HPA):
         """Emit the next due ADS-B squitter as (label, hex_frame), or None.
 
@@ -442,7 +496,7 @@ class SimAircraft:
 
 class CombinedApp(tk.Tk):
 
-    def __init__(self, c_lat, c_lon, rng, declination=0.0):
+    def __init__(self, c_lat, c_lon, rng, declination=0.0, cfg_path=None):
         super().__init__()
         self.title("IFF Radar")
         self.configure(bg=ui.PANEL)
@@ -489,6 +543,21 @@ class CombinedApp(tk.Tk):
         # Emitter -> channel -> receiver.  The receiver owns the track store;
         # the app only reads it to draw.  Colours are assigned by address so a
         # track keeps its colour across a decay-and-reacquire cycle.
+        # Custom 1090 format.  A bad config must not stop the simulator from
+        # starting — it reports the problem and falls back to standard ADS-B.
+        self._cfg_path = cfg_path
+        self.fmt = None
+        self.fmt_error = None
+        try:
+            self.fmt = pseudo1090.load(cfg_path)
+        except pseudo1090.ConfigError as e:
+            self.fmt_error = str(e)
+        self._tx_mode = (self.fmt.mode if self.fmt
+                         else pseudo1090.MODE_STANDARD)
+        # Append-only 1090 airtime log, newest last, capped.
+        self._log: list[tuple] = []
+        self._log_dirty = True
+
         self.site = channel.RadarSite(lat=c_lat, lon=c_lon)
         self._colors: dict[int, str] = {}
         self.rx = Receiver(self.site, colour_fn=self._color_for)
@@ -541,8 +610,12 @@ class CombinedApp(tk.Tk):
         self._v_dwell  = tk.StringVar(value="hits/dwell —")
         self._v_status = tk.StringVar(value="")
         self._v_truth  = tk.BooleanVar(value=False)
+        self._v_txmode = tk.StringVar(value=self._tx_mode)
+        self._v_logstat = tk.StringVar(value="")
+        self._v_fmtinfo = tk.StringVar(value="")
 
         self._build_ui()
+        self._refresh_fmtinfo()
         self.bind("<F11>",    self._toggle_fullscreen)
         self.bind("<Escape>", self._exit_fullscreen)
 
@@ -551,6 +624,91 @@ class CombinedApp(tk.Tk):
 
     def _on_close(self):
         self.destroy()
+
+    # ── 1090 MHz airtime log ──────────────────────────────────────────────────
+
+    def _log_1090(self, kind, label, frame, decoded=True, lost=False):
+        """Record one transmission.  Append-only and capped, unlike every other
+        text view here, which is a snapshot rebuilt each refresh."""
+        self._log.append((time.monotonic(), kind, label, frame, decoded, lost))
+        if len(self._log) > _LOG_MAX:
+            del self._log[:len(self._log) - _LOG_MAX]
+        self._log_dirty = True
+
+    def _apply_txmode(self, _val=None):
+        self._tx_mode = self._v_txmode.get()
+        if self._tx_mode != pseudo1090.MODE_STANDARD and self.fmt is None:
+            # Nothing to transmit: say so instead of going silently dead.
+            self._v_txmode.set(pseudo1090.MODE_STANDARD)
+            self._tx_mode = pseudo1090.MODE_STANDARD
+        self._refresh_fmtinfo()
+
+    def _reload_fmt(self):
+        """Re-read the config without restarting, so editing the cfg is a fast
+        loop.  A bad file leaves the previous format in place."""
+        try:
+            self.fmt = pseudo1090.load(self._cfg_path)
+            self.fmt_error = None
+            for ac in self._aircraft:
+                ac._pseudo_due.clear()
+        except pseudo1090.ConfigError as e:
+            self.fmt_error = str(e)
+        self._refresh_fmtinfo()
+
+    def _refresh_fmtinfo(self):
+        if self.fmt_error:
+            first = self.fmt_error.strip().splitlines()
+            n = max(0, len(first) - 1)
+            self._v_fmtinfo.set(f"config error ({n} problem"
+                                f"{'' if n == 1 else 's'}) — see terminal; "
+                                f"transmitting standard ADS-B")
+            self._fmt_lbl.config(fg=_DWELL_LOW_COL)
+            print(f"[pseudo1090] {self.fmt_error}")
+            return
+        if self.fmt is None:
+            self._v_fmtinfo.set("no custom format loaded")
+            self._fmt_lbl.config(fg=ui.FG_DIM)
+            return
+        names = ", ".join(self.fmt.messages)
+        bits = "addr in every msg" if self.fmt.addr_field else (
+            "addr in one msg" if self.fmt.has_address else "NO ADDRESS")
+        self._v_fmtinfo.set(f"{os.path.basename(self.fmt.path)}: "
+                            f"{len(self.fmt.messages)} msgs ({names}); {bits}")
+        self._fmt_lbl.config(
+            fg=_DWELL_LOW_COL if not self.fmt.has_address else ui.FG_DIM)
+
+    # ── 1090 airtime log ──────────────────────────────────────────────────────
+
+    _LOG_FMT = "{t:>7} {kind:<6} {label:<9} {st:<4} {hex}"
+
+    def _flush_log(self):
+        if not self._log_dirty:
+            return
+        self._log_dirty = False
+        t0 = self._log[0][0] if self._log else 0.0
+        w = self._log_txt
+        # Only autoscroll when already at the bottom, so scrolling back to read
+        # something is not yanked away on the next frame.
+        at_end = w.yview()[1] >= 0.999
+        w.config(state=tk.NORMAL)
+        w.delete("1.0", tk.END)
+        for ts, kind, label, frame, decoded, lost in self._log:
+            if lost:
+                st, tag = "lost", "lost"
+            elif not decoded:
+                st, tag = "??", "nodec"
+            else:
+                st, tag = "ok", ("custom" if kind == "CUSTOM" else "ok")
+            w.insert(tk.END, self._LOG_FMT.format(
+                t=f"{ts - t0:6.1f}", kind=kind, label=(label or "")[:9],
+                st=st, hex=frame or "") + "\n", tag)
+        w.config(state=tk.DISABLED)
+        if at_end:
+            w.see(tk.END)
+        rx = self.rx
+        self._v_logstat.set(f"{len(self._log)} tx  "
+                            f"{rx.undecodable} undec  "
+                            f"{rx.unattributed} unattr")
 
     # ── Track store (owned by the receiver) ───────────────────────────────────
 
@@ -597,15 +755,45 @@ class CombinedApp(tk.Tk):
                                            bg=ui.PANEL, troughcolor=ui.PANEL,
                                            activebackground=ui.PANEL)
         self._detail.config(yscrollcommand=self._detail_scroll.set)
-        self._detail.pack(side=tk.LEFT, fill=tk.BOTH, expand=True,
+        self._detail.pack(side=tk.TOP, fill=tk.BOTH, expand=True,
                           padx=ui.PAD, pady=ui.PAD2)
-        self._detail_scroll.pack(side=tk.RIGHT, fill=tk.Y,
-                                 pady=ui.PAD2, padx=(0, ui.PAD))
+        self._detail_scroll.place(in_=self._detail, relx=1.0, rely=0,
+                                  relheight=1.0, anchor="ne")
         self._detail.config(state=tk.NORMAL)
         self._detail.insert(tk.END,
                             "IFF  (click a track)\n\n"
                             "ADS-B  (click a track)")
         self._detail.config(state=tk.DISABLED)
+
+        # ── Left panel, lower half: 1090 MHz airtime ──────────────────────────
+        # The only append-only view in the app.  Everything else here is a
+        # snapshot rebuilt each refresh; this is a running record of what was
+        # actually transmitted and whether the receiver made sense of it.
+        ui.sep(lp)
+        hdr = tk.Frame(lp, bg=ui.PANEL)
+        hdr.pack(fill=tk.X, padx=ui.PAD)
+        tk.Label(hdr, text="1090 AIRTIME", bg=ui.PANEL, fg=ui.FG,
+                 font=ui.F_MD, anchor="w").pack(side=tk.LEFT)
+        tk.Label(hdr, textvariable=self._v_logstat, bg=ui.PANEL, fg=ui.FG_DIM,
+                 font=ui.F_SM, anchor="e").pack(side=tk.RIGHT)
+        ui.sep(lp)
+
+        self._log_txt = tk.Text(lp, bg=ui.ENTRY, fg="#888888", font=ui.F_SM,
+                                relief=tk.FLAT, bd=0, wrap=tk.NONE,
+                                highlightthickness=0, state=tk.DISABLED,
+                                cursor="arrow", height=10)
+        self._log_txt.tag_configure("ok", foreground="#aaaaaa")
+        self._log_txt.tag_configure("custom", foreground="#7fd0c0")
+        self._log_txt.tag_configure("lost", foreground=_LOG_LOST_COL)
+        self._log_txt.tag_configure("nodec", foreground=_DWELL_LOW_COL)
+        self._log_scroll = tk.Scrollbar(lp, command=self._log_txt.yview,
+                                        bg=ui.PANEL, troughcolor=ui.PANEL,
+                                        activebackground=ui.PANEL)
+        self._log_txt.config(yscrollcommand=self._log_scroll.set)
+        self._log_txt.pack(side=tk.TOP, fill=tk.BOTH, expand=True,
+                           padx=ui.PAD, pady=ui.PAD2)
+        self._log_scroll.place(in_=self._log_txt, relx=1.0, rely=0,
+                               relheight=1.0, anchor="ne")
 
         # ── Canvas ────────────────────────────────────────────────────────────
         self.cv = tk.Canvas(self, width=ui.CANVAS_SZ, height=ui.CANVAS_SZ,
@@ -625,8 +813,31 @@ class CombinedApp(tk.Tk):
         p = ui.make_scroll_panel(self, side=tk.RIGHT, width=_PANEL_W)
         self._panel = p
 
-        # ── INTERROGATION ──
+        # ── 1090 FORMAT ──
         tk.Frame(p, bg=ui.PANEL, height=round(10 * ui.SCALE)).pack()
+        tk.Label(p, text="1090 FORMAT", bg=ui.PANEL, fg=ui.FG,
+                 font=ui.F_MD, anchor="w").pack(fill=tk.X, padx=ui.PAD)
+        ui.sep(p)
+
+        tmf = tk.Frame(p, bg=ui.PANEL)
+        tmf.pack(fill=tk.X, padx=ui.PAD, pady=ui.PAD2)
+        tk.Label(tmf, text="transmit", bg=ui.PANEL, fg=ui.FG_DIM,
+                 font=ui.F_MD, width=9, anchor="w").pack(side=tk.LEFT)
+        tm = tk.OptionMenu(tmf, self._v_txmode, *pseudo1090.MODES,
+                           command=self._apply_txmode)
+        tm.config(bg=ui.ENTRY, fg=ui.FG, activebackground=ui.BTN_ACT,
+                  font=ui.F_MD, relief=tk.FLAT, bd=0, highlightthickness=0)
+        tm["menu"].config(bg=ui.ENTRY, fg=ui.FG, font=ui.F_MD)
+        tm.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        self._fmt_lbl = tk.Label(p, textvariable=self._v_fmtinfo, bg=ui.PANEL,
+                                 fg=ui.FG_DIM, font=ui.F_SM, anchor="w",
+                                 justify=tk.LEFT, wraplength=_PANEL_W - 4 * ui.PAD)
+        self._fmt_lbl.pack(fill=tk.X, padx=ui.PAD, pady=(0, ui.PAD2))
+        self._button(p, "Reload format cfg", self._reload_fmt)
+
+        # ── INTERROGATION ──
+        ui.sep(p)
         tk.Label(p, text="INTERROGATION", bg=ui.PANEL, fg=ui.FG,
                  font=ui.F_MD, anchor="w").pack(fill=tk.X, padx=ui.PAD)
         ui.sep(p)
@@ -1079,6 +1290,7 @@ class CombinedApp(tk.Tk):
             ac._lon   = None
             ac._hdg   = None
             ac._adsb_due.clear()
+            ac._pseudo_due.clear()
 
     # ── Sweep azimuth ─────────────────────────────────────────────────────────
 
@@ -1255,28 +1467,33 @@ class CombinedApp(tk.Tk):
     def _reported_pos(self, trk, now):
         """Where a track was last *reported* to be, as (lat, lon, source).
 
-        Two independent sources, whichever is fresher:
-          "iff"   the measured plot — range from round-trip delay, bearing from
-                  the beam — converted back to lat/lon for drawing.
-          "adsb"  the CPR-resolved reported position.
+        Three independent sources, whichever is fresher:
+          "iff"     the measured plot — range from round-trip delay, bearing
+                    from the beam — converted back to lat/lon for drawing.
+          "adsb"    the CPR-resolved reported position.
+          "pseudo"  a position decoded from the custom 1090 format.
 
-        Returns None when neither is available, which is the correct answer for
-        a track that has an address and an altitude but no position yet.
+        Returns None when none is available, which is the correct answer for a
+        track that has an address and an altitude but no position yet.
         """
         plot = trk["plot"]
         p_ts = plot["ts"] if plot else -1.0
         if p_ts >= 0 and (now - p_ts) > _FIELD_STALE_S:
             p_ts = -1.0
 
-        lat = _fld(trk["adsb"], "lat", now)
-        lon = _fld(trk["adsb"], "lon", now)
-        a_ts = _fld_age(trk["adsb"], "lat", now)
-        a_ts = -1.0 if (lat is None or lon is None or a_ts is None) else now - a_ts
+        rlat = _rx_field(trk, "lat", now)
+        rlon = _rx_field(trk, "lon", now)
+        if rlat is None or rlon is None:
+            lat = lon = which = None
+            a_ts = -1.0
+        else:
+            lat, lon, which = rlat[0], rlon[0], rlat[2]
+            a_ts = min(rlat[1], rlon[1])
 
         if p_ts < 0 and a_ts < 0:
             return None
         if a_ts >= p_ts:
-            return lat, lon, "adsb"
+            return lat, lon, which
         # Measured range/bearing back to lat/lon about the radar site.
         rng, brg = plot["rng_nm"], plot["brg_deg"]
         nm_n = rng * math.cos(math.radians(brg))
@@ -1341,7 +1558,8 @@ class CombinedApp(tk.Tk):
             if pt is None:
                 continue
             age = now - max(trk["iff"].get("last_ts", 0),
-                            trk["adsb"].get("last_ts", 0))
+                            trk["adsb"].get("last_ts", 0),
+                            trk["pseudo"].get("last_ts", 0))
             plots.append((addr, trk, pt, age, src))
 
         # 6.5 — one structural signature PER TRACK, not one for the whole
@@ -1354,13 +1572,14 @@ class CombinedApp(tk.Tk):
         live = set()
         for addr, trk, (x, y), age, src in plots:
             live.add(addr)
-            hdg = _fld(trk["adsb"], "track_deg", now)
+            _tk = _rx_field(trk, "track_deg", now)
+            hdg = None if _tk is None else _tk[0]
+            _cl = _rx_field(trk, "call", now)
             call = (_fld(trk["iff"], "call", now)
-                    or _fld(trk["adsb"], "call", now)
+                    or (_cl[0] if _cl else None)
                     or f"TRK{trk['trk_no']:03d}")
-            alt = _fld(trk["adsb"], "alt_ft", now)
-            if alt is None:
-                alt = _fld(trk["iff"], "alt_ft", now)
+            _al = _rx_field(trk, "alt_ft", now)
+            alt = _al[0] if _al else _fld(trk["iff"], "alt_ft", now)
             bits = [fmt_alt(alt)] if alt is not None else []
             if hdg is not None:
                 bits.append(f"{self._mag(hdg):03.0f}°M")
@@ -1497,7 +1716,8 @@ class CombinedApp(tk.Tk):
 
         for addr, trk in self._tracks.items():
             di, da, dp = trk["iff"], trk["adsb"], trk["plot"]
-            age = now - max(di.get("last_ts", 0), da.get("last_ts", 0))
+            age = now - max(di.get("last_ts", 0), da.get("last_ts", 0),
+                            trk["pseudo"].get("last_ts", 0))
             if age > _BLIP_DECAY_S:
                 continue
 
@@ -1507,22 +1727,35 @@ class CombinedApp(tk.Tk):
             if dp and (now - dp["ts"]) <= _FIELD_STALE_S:
                 rng, brg = dp["rng_nm"], dp["brg_deg"]
             else:
-                lat = _fld(da, "lat", now)
-                lon = _fld(da, "lon", now)
+                _la, _lo = _rx_field(trk, "lat", now), _rx_field(trk, "lon", now)
+                lat = _la[0] if _la else None
+                lon = _lo[0] if _lo else None
                 if lat is not None and lon is not None:
                     brg, rng = iff.bearing_range_nm(self.c_lat, self.c_lon, lat, lon)
 
             # Each field ages independently.
-            sqwk = _fld(di, "sqwk", now)
-            m1   = _fld(di, "m1", now)
-            m2   = _fld(di, "m2", now)
-            alt  = _fld(da, "alt_ft", now)
-            if alt is None:
-                alt = _fld(di, "alt_ft", now)
-            # Callsign: prefer IFF Mode S Selective BDS 2,0 over ADS-B TC=4.
-            call = _fld(di, "call", now) or _fld(da, "call", now) or "—"
-            # ADDR only shows once a Mode S reply has actually delivered it.
+            # IFF fields first, then whichever 1090 format is fresher.
+            def _any(key):
+                v = _fld(di, key, now)
+                if v is not None:
+                    return v
+                r = _rx_field(trk, key, now)
+                return r[0] if r else None
+
+            sqwk = _any("sqwk")
+            m1   = _any("m1")
+            m2   = _any("m2")
+            _al  = _rx_field(trk, "alt_ft", now)
+            alt  = _al[0] if _al else _fld(di, "alt_ft", now)
+            # Callsign: prefer IFF Mode S Selective BDS 2,0 over the 1090 stream.
+            call = _any("call") or "—"
+            # ADDR shows once any source has actually delivered it — a Mode S
+            # reply, or a custom format that carries the address.
             ms_addr = _fld(di, "modes_addr", now)
+            if ms_addr is None and self.rx.known_addrs.get(addr) == "C" \
+                    and trk["pseudo"].get("last_ts"):
+                if (now - trk["pseudo"]["last_ts"]) <= _FIELD_STALE_S:
+                    ms_addr = addr
 
             # 5.7 — special-purpose codes and the ident pulse get the row
             # highlighted, since they are the whole reason to notice a row.
@@ -1612,7 +1845,8 @@ class CombinedApp(tk.Tk):
             t.insert(tk.END, line, "stale" if stale else "row")
 
         how = self._known_addrs.get(addr)
-        prov = {"S": "Mode S reply", "A": "ADS-B"}.get(how, "not yet learned")
+        prov = {"S": "Mode S reply", "A": "ADS-B",
+                "C": "custom 1090 format"}.get(how, "not yet learned")
         t.insert(tk.END, f"TRK{trk['trk_no']:03d}   {addr:06X}\n", "hdr")
         t.insert(tk.END, f"address via {prov}\n\n", "stale")
 
@@ -1662,6 +1896,28 @@ class CombinedApp(tk.Tk):
             field("V/S", "vrate_fpm", da, lambda v: f"{v:+.0f} fpm")
             if da.get("lat") is None:
                 t.insert(tk.END, "  CPR   awaiting even/odd pair\n", "stale")
+
+        # ── Custom 1090 format ──
+        dc = trk["pseudo"]
+        if dc.get("last_ts") is not None:
+            t.insert(tk.END, f"\nC1090 last {dc.get('last_type', '?')}"
+                             f"  {now - dc['last_ts']:.1f}s\n", "hdr")
+            spec = dc.get("_spec")
+            vals = dc.get("_decoded") or {}
+            dts = dc.get("_decoded_ts", now)
+            stale = (now - dts) > _FIELD_STALE_S
+            if self.fmt is not None and self.fmt.addr_field and "address" in vals:
+                t.insert(tk.END, f"  {'ADDR':<5} {vals['address']:06X}"
+                                 f"       {now - dts:5.1f}s\n",
+                         "stale" if stale else "row")
+            if spec is not None:
+                for fld in spec.fields:
+                    shown = fld.format(vals.get(fld.name))
+                    t.insert(tk.END, f"  {fld.name[:5]:<5} {shown:<12} "
+                                     f"{now - dts:5.1f}s\n",
+                             "stale" if stale else "row")
+            if "last_raw" in dc:
+                t.insert(tk.END, "  " + str(dc["last_raw"]) + "\n", "stale")
 
         # Raw frames stay available, just no longer the whole story.
         if "last_raw" in di:
@@ -1744,17 +2000,36 @@ class CombinedApp(tk.Tk):
         # 3. Run interrogation for this frame
         self._run_interrogation(now, dt)
 
-        # 4. ADS-B: aircraft emit, the channel drops some, the receiver decodes
+        # 4. 1090 MHz: aircraft emit, the channel drops some, the receiver
+        # decodes.  Standard ADS-B and the custom format share this path
+        # because they share the physical layer — same range, same horizon,
+        # same per-frame loss.  Which of them is transmitted is the mode.
+        mode = self._tx_mode
         for ac in self._aircraft:
-            out = ac.adsb_frame(now, self._qnh_snap)
-            if out is None:
-                continue
-            _label, frame = out
-            frame = channel.deliver_adsb(ac, self.site, frame, now)
-            if frame is None:
-                continue
-            if self.rx.rx_adsb(frame, now) is not None:
-                self._table_dirty = True
+            if mode in (pseudo1090.MODE_STANDARD, pseudo1090.MODE_BOTH):
+                out = ac.adsb_frame(now, self._qnh_snap)
+                if out is not None:
+                    label, frame = out
+                    frame = channel.deliver_adsb(ac, self.site, frame, now)
+                    if frame is None:
+                        self._log_1090("ADSB", label, None, lost=True)
+                    else:
+                        ok = self.rx.rx_adsb(frame, now) is not None
+                        self._log_1090("ADSB", label, frame, decoded=ok)
+                        self._table_dirty = True
+
+            if mode in (pseudo1090.MODE_CUSTOM, pseudo1090.MODE_BOTH) \
+                    and self.fmt is not None:
+                out = ac.pseudo_frame(now, self.fmt)
+                if out is not None:
+                    name, frame = out
+                    frame = channel.deliver_adsb(ac, self.site, frame, now)
+                    if frame is None:
+                        self._log_1090("CUSTOM", name, None, lost=True)
+                    else:
+                        ok = self.rx.rx_pseudo(frame, now, self.fmt) is not None
+                        self._log_1090("CUSTOM", name, frame, decoded=ok)
+                        self._table_dirty = True
 
         # 5. Refresh aircraft listbox
         self._refresh_list()
@@ -1765,6 +2040,7 @@ class CombinedApp(tk.Tk):
         # 7. Flush track table (~5 Hz or when dirty)
         if self._table_dirty or (now - self._table_last) >= 0.2:
             self._flush_table()
+            self._flush_log()
             self._table_last = now
 
     # ── Fullscreen ────────────────────────────────────────────────────────────
@@ -1787,11 +2063,15 @@ def main():
     p.add_argument("--centre", metavar="LAT,LON", default=None)
     p.add_argument("--range",  type=float, default=200.0)
     p.add_argument("--declination", type=float, default=0.0)
+    p.add_argument("--format-cfg", metavar="PATH", default=None,
+                   help="custom 1090 message format "
+                        f"(default: {os.path.basename(pseudo1090.DEFAULT_CFG)})")
     args = p.parse_args()
     lat, lon = 51.477, -0.461
     if args.centre:
         lat, lon = map(float, args.centre.split(","))
-    CombinedApp(lat, lon, args.range, args.declination).mainloop()
+    CombinedApp(lat, lon, args.range, args.declination,
+                cfg_path=args.format_cfg).mainloop()
 
 
 if __name__ == "__main__":

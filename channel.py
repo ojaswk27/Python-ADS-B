@@ -35,8 +35,15 @@ class RadarSite:
     adsb_max_range_nm: float = 250.0
     iff_reply_prob:    float = 0.97
     adsb_frame_prob:   float = 0.95
-    # Monopulse azimuth estimate is good but not exact.
+    # Monopulse azimuth estimation error, 1 sigma, on boresight.  Real SSR
+    # monopulse achieves roughly 0.05-0.15 deg.
     brg_noise_deg:     float = 0.1
+    # False falls back to beam-pointing-angle azimuth (pre-monopulse SSR), whose
+    # error is beam-limited rather than ~0.1 deg.
+    monopulse:         bool = True
+    # Half the beamwidth, for scaling the estimate error toward the beam edge.
+    # Kept on the site so the channel need not know the radar's UI state.
+    beam_half_deg:     float = 1.5
 
 
 # Two Mode A/C replies whose slant ranges are closer than this overlap in the
@@ -44,6 +51,9 @@ class RadarSite:
 # artefact, and it is what makes all-call acquisition probabilistic rather than
 # instantaneous.
 GARBLE_WINDOW_NM = 1.7
+
+# Monopulse error multiplier at the beam edge, relative to boresight.
+_EDGE_SIGMA_MULT = 3.0
 
 
 def radio_horizon_nm(h_ant_ft, h_ac_ft):
@@ -123,12 +133,41 @@ def garbled(ranges_nm, window_nm=GARBLE_WINDOW_NM):
     return bad
 
 
-def measure_bearing(beam_az_deg, site):
-    """The azimuth the receiver reports for a reply: the beam pointing angle
-    plus monopulse estimation noise."""
-    if site.brg_noise_deg <= 0.0:
-        return beam_az_deg % 360.0
-    return (beam_az_deg + random.gauss(0.0, site.brg_noise_deg)) % 360.0
+def measure_bearing(beam_az_deg, site, true_brg_deg=None):
+    """The azimuth the receiver reports for one reply.
+
+    Two techniques, selected by site.monopulse:
+
+    Monopulse (the default, and what any modern SSR does) compares the antenna's
+    sum and difference patterns to estimate how far off boresight the target is,
+    *within a single reply*.  So the reported azimuth is the true bearing plus a
+    small estimation error — NOT the beam pointing angle.  That distinction is
+    the whole point of monopulse and it is worth being explicit about: reporting
+    the beam angle instead leaves an error of up to half a beamwidth, which at
+    3 deg and 25 nm is about 300 m of cross-range, and it jumps around from scan
+    to scan as the PRT grid drifts against the target.
+
+    Sliding window (monopulse=False) is the older technique: azimuth comes from
+    where the beam was pointing, so the error is beam-limited.  Kept because it
+    is what the previous behaviour actually modelled, and it makes the value of
+    monopulse visible by contrast.
+
+    Accuracy degrades toward the beam edges, where the difference pattern gives
+    less signal, so the noise is scaled by off-boresight angle.
+    """
+    if true_brg_deg is None or not site.monopulse:
+        base = beam_az_deg
+        sigma = site.brg_noise_deg
+    else:
+        base = true_brg_deg
+        # 1.0x sigma on boresight, growing to _EDGE_SIGMA_MULT at the beam edge.
+        off = abs(iff.angle_diff(true_brg_deg, beam_az_deg))
+        frac = min(off / max(site.beam_half_deg, 1e-6), 1.0)
+        sigma = site.brg_noise_deg * (1.0 + (_EDGE_SIGMA_MULT - 1.0) * frac)
+
+    if sigma <= 0.0:
+        return base % 360.0
+    return (base + random.gauss(0.0, sigma)) % 360.0
 
 
 # ── ADS-B ─────────────────────────────────────────────────────────────────────

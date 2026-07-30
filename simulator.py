@@ -27,7 +27,7 @@ Controls
 Usage
 -----
     python simulator.py
-    python simulator.py --centre 51.5,-0.5 --range 150
+    python simulator.py --centre 28,77 --range 150
     python simulator.py --declination 1.5
 """
 
@@ -580,6 +580,11 @@ class CombinedApp(tk.Tk):
         self._v_bw     = tk.DoubleVar(value=_DEFAULT_BW)
         self._v_prt    = tk.IntVar(value=_DEFAULT_PRT)
         self._v_qnh    = tk.DoubleVar(value=iff.STD_QNH_HPA)
+        self._v_clat   = tk.StringVar()
+        self._v_clon   = tk.StringVar()
+        self._v_crng   = tk.StringVar()
+        self._v_cant   = tk.StringVar()
+        self._v_siteerr = tk.StringVar(value="")
         self._v_unit2  = tk.StringVar(value=f"{_DEFAULT_UNIT_CODE:04o}")
 
         # Snapshots of Tk vars for the main loop
@@ -615,6 +620,7 @@ class CombinedApp(tk.Tk):
         self._v_fmtinfo = tk.StringVar(value="")
 
         self._build_ui()
+        self._refresh_site()
         self._refresh_fmtinfo()
         self.bind("<F11>",    self._toggle_fullscreen)
         self.bind("<Escape>", self._exit_fullscreen)
@@ -634,6 +640,76 @@ class CombinedApp(tk.Tk):
         if len(self._log) > _LOG_MAX:
             del self._log[:len(self._log) - _LOG_MAX]
         self._log_dirty = True
+
+    def _refresh_site(self):
+        """Push the live site values back into the entry fields."""
+        self._v_clat.set(f"{self.c_lat:.5f}")
+        self._v_clon.set(f"{self.c_lon:.5f}")
+        self._v_crng.set(f"{self.rng:g}")
+        self._v_cant.set(f"{self.site.ant_height_ft:g}")
+
+    def _apply_site(self, _ev=None):
+        """Move or resize the radar.
+
+        Relocating the site invalidates every track: a stored plot is a range
+        and bearing measured FROM the old position, so reprojecting it about the
+        new one would place the target somewhere it never was.  Clearing is both
+        simpler and what physically happens when you move a radar — you start
+        the picture again.
+        """
+        def num(var, lo, hi, cur, name):
+            try:
+                v = float(var.get().strip())
+            except ValueError:
+                errs.append(f"{name}: not a number")
+                return cur
+            if not (lo <= v <= hi):
+                errs.append(f"{name}: must be {lo:g} to {hi:g}")
+                return cur
+            return v
+
+        errs = []
+        lat = num(self._v_clat, -90.0, 90.0, self.c_lat, "centre lat")
+        lon = num(self._v_clon, -180.0, 180.0, self.c_lon, "centre lon")
+        rng = num(self._v_crng, 1.0, 500.0, self.rng, "range nm")
+        ant = num(self._v_cant, 0.0, 20000.0, self.site.ant_height_ft, "ant ft")
+
+        self._v_siteerr.set("; ".join(errs))
+        moved = (lat, lon) != (self.c_lat, self.c_lon)
+        if (lat, lon, rng, ant) == (self.c_lat, self.c_lon, self.rng,
+                                    self.site.ant_height_ft):
+            self._refresh_site()
+            return
+
+        self.c_lat, self.c_lon, self.rng = lat, lon, rng
+        self.site.lat, self.site.lon = lat, lon
+        self.site.ant_height_ft = ant
+
+        if moved:
+            for addr in list(self._tracks):
+                self.rx.forget(addr)
+            self._log.clear()
+            self._log_dirty = True
+        # Force a full repaint: the background, the routes and every cached blip
+        # are all positioned against the old view.
+        self._bg_sig = None
+        self._routes_dirty = True
+        self.cv.delete("blip")
+        self._blip_items.clear()
+        self._blip_fade.clear()
+        self._table_dirty = True
+        self._refresh_site()
+
+    def _centre_on_selected(self):
+        """Put the radar under the selected aircraft — the quickest way to get a
+        drawn route into range."""
+        ac = self._selected
+        if ac is None or ac.lat is None:
+            self._v_siteerr.set("no aircraft selected")
+            return
+        self._v_clat.set(f"{ac.lat:.5f}")
+        self._v_clon.set(f"{ac.lon:.5f}")
+        self._apply_site()
 
     def _apply_txmode(self, _val=None):
         self._tx_mode = self._v_txmode.get()
@@ -813,8 +889,25 @@ class CombinedApp(tk.Tk):
         p = ui.make_scroll_panel(self, side=tk.RIGHT, width=_PANEL_W)
         self._panel = p
 
-        # ── 1090 FORMAT ──
+        # ── RADAR SITE ──
         tk.Frame(p, bg=ui.PANEL, height=round(10 * ui.SCALE)).pack()
+        tk.Label(p, text="RADAR SITE", bg=ui.PANEL, fg=ui.FG,
+                 font=ui.F_MD, anchor="w").pack(fill=tk.X, padx=ui.PAD)
+        ui.sep(p)
+        for lbl, var in (("centre lat", self._v_clat), ("centre lon", self._v_clon),
+                         ("range nm", self._v_crng), ("ant ft", self._v_cant)):
+            e = ui.entry_row(p, lbl, var)
+            e.bind("<Return>",   self._apply_site)
+            e.bind("<FocusOut>", self._apply_site)
+        self._site_lbl = tk.Label(p, textvariable=self._v_siteerr, bg=ui.PANEL,
+                                  fg=_DWELL_LOW_COL, font=ui.F_SM, anchor="w",
+                                  justify=tk.LEFT,
+                                  wraplength=_PANEL_W - 4 * ui.PAD)
+        self._site_lbl.pack(fill=tk.X, padx=ui.PAD)
+        self._button(p, "Centre on selected", self._centre_on_selected)
+
+        # ── 1090 FORMAT ──
+        ui.sep(p)
         tk.Label(p, text="1090 FORMAT", bg=ui.PANEL, fg=ui.FG,
                  font=ui.F_MD, anchor="w").pack(fill=tk.X, padx=ui.PAD)
         ui.sep(p)
@@ -1371,7 +1464,7 @@ class CombinedApp(tk.Tk):
             brg, rng = iff.bearing_range_nm(self.c_lat, self.c_lon, ac.lat, ac.lon)
             if abs(iff.angle_diff(brg, az)) > half_bw:
                 continue
-            illuminated.append((ac, rng))
+            illuminated.append((ac, rng, brg))
 
         if not illuminated:
             return
@@ -1382,7 +1475,7 @@ class CombinedApp(tk.Tk):
         # garbled still goes quiet, which is what makes acquisition
         # probabilistic instead of instant.
         delivered = []
-        for ac, rng in illuminated:
+        for ac, rng, brg in illuminated:
             out = channel.deliver_iff(ac, self.site, mode, t, self._prt_no,
                                       rng_nm=rng, qnh_hpa=self._qnh_snap)
             if mode == iff.MODE_S_AC and out is not None:
@@ -1391,7 +1484,7 @@ class CombinedApp(tk.Tk):
                 ac._last_sel_scan = self._scan_no
             if out is not None:
                 frame, t_rx = out
-                delivered.append((frame, t_rx, rng))
+                delivered.append((frame, t_rx, rng, brg))
 
         if not delivered:
             return
@@ -1399,17 +1492,23 @@ class CombinedApp(tk.Tk):
         # Stage 3 — garble.  Only Modes 1/2/3A/C: Mode S replies are addressed
         # and CRC-protected, so they do not garble each other this way.
         if not iff.mode_is_s(mode) and len(delivered) > 1:
-            bad = channel.garbled([r for _f, _t, r in delivered])
+            bad = channel.garbled([r for _f, _t, r, _b in delivered])
         else:
             bad = ()
 
         # Stage 4 — receiver.  Decodes what arrived; measures range from the
         # delay and bearing from the beam.
-        for i, (frame, t_rx, _rng) in enumerate(delivered):
+        for i, (frame, t_rx, _rng, true_brg) in enumerate(delivered):
             if i in bad:
                 self._garble_count += 1
                 continue
-            brg_meas = channel.measure_bearing(az, self.site)
+            # The channel needs the true bearing to model a monopulse
+            # estimate — monopulse measures the off-boresight angle, so the
+            # reported azimuth is the true bearing plus estimation error, not
+            # the beam pointing angle.  Geometry is what channel.py is allowed
+            # to see; what comes back is a measurement, not truth.
+            self.site.beam_half_deg = half_bw
+            brg_meas = channel.measure_bearing(az, self.site, true_brg)
             if self.rx.rx_iff(frame, t, t_rx, brg_meas) is not None:
                 self._table_dirty = True
 
@@ -1467,13 +1566,20 @@ class CombinedApp(tk.Tk):
     def _reported_pos(self, trk, now):
         """Where a track was last *reported* to be, as (lat, lon, source).
 
-        Three independent sources, whichever is fresher:
+        Three independent sources:
+          "adsb"    the CPR-resolved reported position, ~1 m encoding error
+          "pseudo"  a position decoded from the custom 1090 format
           "iff"     the measured plot — range from round-trip delay, bearing
-                    from the beam — converted back to lat/lon for drawing.
-          "adsb"    the CPR-resolved reported position.
-          "pseudo"  a position decoded from the custom 1090 format.
+                    from monopulse — converted back to lat/lon for drawing
 
-        Returns None when none is available, which is the correct answer for a
+        Selected by ACCURACY, not by which arrived most recently.  Picking the
+        freshest made the blip jump once per scan and straight back: a reported
+        position is good to a few metres, an IFF plot to a few hundred, so
+        alternating between them on alternate frames moves the blip by the
+        difference every time the beam comes round.  A fused display prefers its
+        best source and falls back only when that source has nothing.
+
+        Returns None when no source has a position — the correct answer for a
         track that has an address and an altitude but no position yet.
         """
         plot = trk["plot"]
@@ -1483,17 +1589,12 @@ class CombinedApp(tk.Tk):
 
         rlat = _rx_field(trk, "lat", now)
         rlon = _rx_field(trk, "lon", now)
-        if rlat is None or rlon is None:
-            lat = lon = which = None
-            a_ts = -1.0
-        else:
-            lat, lon, which = rlat[0], rlon[0], rlat[2]
-            a_ts = min(rlat[1], rlon[1])
+        if rlat is not None and rlon is not None:
+            # A reported position beats a measured plot whenever it is current.
+            return rlat[0], rlon[0], rlat[2]
 
-        if p_ts < 0 and a_ts < 0:
+        if p_ts < 0:
             return None
-        if a_ts >= p_ts:
-            return lat, lon, which
         # Measured range/bearing back to lat/lon about the radar site.
         rng, brg = plot["rng_nm"], plot["brg_deg"]
         nm_n = rng * math.cos(math.radians(brg))
@@ -2067,7 +2168,7 @@ def main():
                    help="custom 1090 message format "
                         f"(default: {os.path.basename(pseudo1090.DEFAULT_CFG)})")
     args = p.parse_args()
-    lat, lon = 51.477, -0.461
+    lat, lon = 28, 77
     if args.centre:
         lat, lon = map(float, args.centre.split(","))
     CombinedApp(lat, lon, args.range, args.declination,

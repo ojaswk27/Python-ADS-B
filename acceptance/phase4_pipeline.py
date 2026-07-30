@@ -6,7 +6,8 @@ Run directly, or via run_all.py.
 import sys
 import math
 
-from harness import (Clock, Suite, add_ac, frames, iff, make_app, source)
+from harness import (Clock, Suite, add_ac, frames, iff, make_app, match_prf,
+                     source)
 import simulator as S
 import channel
 import receiver
@@ -205,6 +206,138 @@ try:
     chk("4.5 IFF plot updates are ~one scan apart, not per frame",
         len(big) >= 2 and min(big) > 1.0,
         f"gaps {gaps[:6]} (scan={scan_s:.0f}s)")
+    # ── 4.4 monopulse: azimuth is measured, not the beam pointing angle ──────
+    # Reporting the beam angle leaves an error up to half a beamwidth (1.5 deg
+    # at the default 3 deg beam), which is ~300 m of cross-range at 25 nm and
+    # shifts the IFF plot away from the ADS-B position.  Monopulse estimates the
+    # off-boresight angle within a single reply, so the error is the estimator's
+    # ~0.1 deg, not the beam's 1.5.
+    import statistics as _st
+    appM = make_app(clock)
+    m = add_ac(appM, [(51.75, -0.15), (52.6, 0.9)], speed_kt=300)
+    appM._v_mode.set("Mode 3/A")
+    errs = []
+    last = None
+    for _ in range(3000):
+        clock.advance(clock.dt)
+        appM._frame()
+        t = appM._tracks.get(m.modes_addr)
+        if not t or not t["plot"] or t["plot"]["ts"] == last:
+            continue
+        last = t["plot"]["ts"]
+        tb, _tr = iff.bearing_range_nm(appM.c_lat, appM.c_lon, m.lat, m.lon)
+        errs.append(abs(iff.angle_diff(t["plot"]["brg_deg"], tb)))
+    sd = _st.pstdev(errs)
+    chk("4.4 monopulse bearing error is estimator-sized, not beam-sized",
+        sd < 0.25, f"sd {sd:.3f} deg (beam half-width is "
+                   f"{appM._bw_snap / 2:.1f}, estimator sigma "
+                   f"{appM.site.brg_noise_deg})")
+    chk("4.4 no bearing error approaches the beam edge",
+        max(errs) < appM._bw_snap / 2, f"max {max(errs):.3f} deg")
+    # ...and the pre-monopulse mode is beam-limited, which is the contrast
+    appM.site.monopulse = False
+    errs2 = []
+    last = None
+    for _ in range(3000):
+        clock.advance(clock.dt)
+        appM._frame()
+        t = appM._tracks.get(m.modes_addr)
+        if not t or not t["plot"] or t["plot"]["ts"] == last:
+            continue
+        last = t["plot"]["ts"]
+        tb, _tr = iff.bearing_range_nm(appM.c_lat, appM.c_lon, m.lat, m.lon)
+        errs2.append(abs(iff.angle_diff(t["plot"]["brg_deg"], tb)))
+    chk("4.4 sliding-window mode is beam-limited by contrast",
+        _st.pstdev(errs2) > sd * 1.5,
+        f"sd {_st.pstdev(errs2):.3f} vs monopulse {sd:.3f}")
+
+    # ── 4.5 the plot must not alternate between sources ──────────────────────
+    # Picking whichever source was freshest made the blip jump to the IFF plot
+    # once per scan and straight back, because a reported position is good to
+    # metres and a measured plot to hundreds of them.  Detect it as a step that
+    # opposes the aircraft's own course: the blip going backwards.
+    appJ = make_app(clock)
+    j = add_ac(appJ, [(51.75, -0.15), (52.05, 0.25)], speed_kt=300)
+    appJ._v_mode.set("Mode 3/A")
+    prev = None
+    backwards = []
+    srcs = {}
+    for _ in range(1600):
+        clock.advance(clock.dt)
+        appJ._frame()
+        t = appJ._tracks.get(j.modes_addr)
+        if not t:
+            continue
+        rp = appJ._reported_pos(t, clock.t)
+        if rp is None:
+            continue
+        srcs[rp[2]] = srcs.get(rp[2], 0) + 1
+        if prev is not None:
+            b, d = iff.bearing_range_nm(prev[0], prev[1], rp[0], rp[1])
+            if d * 1852 > 20 and abs(iff.angle_diff(b, j.course())) > 90:
+                backwards.append(d * 1852)
+        prev = (rp[0], rp[1])
+    chk("4.5 the plot never steps backwards along its own course",
+        not backwards,
+        f"{len(backwards)} backwards steps"
+        + (f", max {max(backwards):.0f} m" if backwards else ""))
+    chk("4.5 a reported position is preferred over a measured plot",
+        srcs.get("adsb", 0) > srcs.get("iff", 0) * 10, str(srcs))
+    chk("4.5 ...but the measured plot is still used before CPR resolves",
+        srcs.get("iff", 0) > 0, str(srcs))
+
+    # ── radar site can be moved and resized at runtime ───────────────────────
+    appS = make_app(clock)
+    chk("site fields populate from the live radar",
+        appS._v_clat.get().startswith("51.477"), appS._v_clat.get())
+    s_ac = add_ac(appS, [(51.6, -0.4), (51.9, -0.1)], speed_kt=300)
+    match_prf(appS)
+    appS._v_mode.set("Mode 3/A")
+    frames(appS, clock, 200, draw=False)
+    chk("a track exists before relocating", bool(appS._tracks))
+    appS._v_clat.set("53.500")
+    appS._apply_site()
+    chk("centre moves", appS.c_lat == 53.5, str(appS.c_lat))
+    chk("the channel site moves with it", appS.site.lat == 53.5, str(appS.site.lat))
+    chk("relocating clears tracks measured from the old site",
+        not appS._tracks, str(list(appS._tracks)))
+    frames(appS, clock, 300, draw=False)
+    t = appS._tracks.get(s_ac.modes_addr)
+    if t and t["plot"]:
+        tb, tr = iff.bearing_range_nm(appS.c_lat, appS.c_lon, s_ac.lat, s_ac.lon)
+        # Bound by travel since the plot, not by an arbitrary tolerance.
+        age = clock.t - t["plot"]["ts"]
+        budget = s_ac.speed_kt / 3600.0 * age + 2 * iff.RANGE_QUANT_NM
+        chk("re-acquires against the new centre",
+            abs(t["plot"]["rng_nm"] - tr) <= budget,
+            f"{t['plot']['rng_nm']:.2f} vs {tr:.2f} nm, budget {budget:.2f} "
+            f"({age:.1f}s old)")
+    else:
+        chk("re-acquires against the new centre", False, "no plot")
+    appS._v_crng.set("120")
+    appS._apply_site()
+    chk("range applies", appS.rng == 120.0, str(appS.rng))
+    appS._v_cant.set("500")
+    appS._apply_site()
+    chk("antenna height applies", appS.site.ant_height_ft == 500.0,
+        str(appS.site.ant_height_ft))
+    appS._v_clat.set("999")
+    appS._apply_site()
+    chk("an out-of-range latitude is refused", appS.c_lat == 53.5, str(appS.c_lat))
+    chk("...with a message naming the field",
+        "centre lat" in appS._v_siteerr.get(), appS._v_siteerr.get())
+    chk("...and the field reverts to the live value",
+        appS._v_clat.get() == "53.50000", appS._v_clat.get())
+    appS._v_clon.set("abc")
+    appS._apply_site()
+    chk("a non-numeric value is refused",
+        "not a number" in appS._v_siteerr.get(), appS._v_siteerr.get())
+    appS._select(s_ac)
+    appS._centre_on_selected()
+    chk("centre-on-selected moves the radar under the aircraft",
+        abs(appS.c_lat - s_ac.lat) < 1e-4,
+        f"{appS.c_lat:.5f} vs {s_ac.lat:.5f}")
+
 finally:
     clock.restore()
 

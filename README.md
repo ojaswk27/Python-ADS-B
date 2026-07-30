@@ -60,6 +60,13 @@ Switch formats with the `transmit` control in the **1090 FORMAT** panel:
 | `custom` | the config's format only, replacing ADS-B entirely |
 | `both` | both, for comparing them side by side on one screen |
 
+The **RADAR SITE** panel moves and resizes the radar at runtime — centre
+latitude/longitude, display range, and antenna height (which feeds the radio
+horizon). **Centre on selected** puts the site under the selected aircraft.
+Relocating clears existing tracks, because a stored plot is a range and bearing
+measured *from the old position*; reprojecting it about the new one would place
+the target somewhere it never was.
+
 The **1090 AIRTIME** pane logs every transmission with its decode result, so a
 frame lost in the channel or rejected by the decoder is visible rather than
 silently absent. `--format-cfg PATH` selects a different config; **Reload

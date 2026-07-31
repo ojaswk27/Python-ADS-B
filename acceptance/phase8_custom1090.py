@@ -26,7 +26,7 @@ def kinds(app):
 clock = Clock(dt=0.05)
 clock.install()
 try:
-    # ── the shipped default must not change existing behaviour ────────────────
+    # the shipped default must not change existing behaviour
     app = make_app(clock)
     chk("default transmit mode is standard ADS-B",
         app._tx_mode == ps.MODE_STANDARD, app._tx_mode)
@@ -34,7 +34,7 @@ try:
     chk("no config error on the shipped file", app.fmt_error is None,
         str(app.fmt_error))
 
-    # ── standard mode: only ADS-B on the air ─────────────────────────────────
+    # standard mode: only ADS-B on the air
     a = add_ac(app, [(51.6, -0.4), (51.9, -0.1)], speed_kt=350)
     match_prf(app)
     frames(app, clock, 200, draw=False)
@@ -47,7 +47,7 @@ try:
     chk("standard mode leaves the custom record empty",
         trk["pseudo"].get("last_ts") is None)
 
-    # ── custom mode: ADS-B replaced entirely ─────────────────────────────────
+    # custom mode: ADS-B replaced entirely
     app2 = make_app(clock)
     app2._v_txmode.set(ps.MODE_CUSTOM)
     app2._apply_txmode()
@@ -106,7 +106,7 @@ try:
         0.1 <= msgs.get("ident", 0) / secs <= 0.35,
         f"{msgs.get('ident', 0) / secs:.2f} Hz")
 
-    # ── the whole point: a custom-only track still plots ─────────────────────
+    # the whole point: a custom-only track still plots
     app3 = make_app(clock)
     app3._v_txmode.set(ps.MODE_CUSTOM)
     app3._apply_txmode()
@@ -143,7 +143,7 @@ try:
     chk("the decoded pane lists decoded custom fields",
         "C1090" in app3._detail.get("1.0", "end"))
 
-    # ── both mode: two formats on one channel ────────────────────────────────
+    # both mode: two formats on one channel
     app4 = make_app(clock)
     app4._v_txmode.set(ps.MODE_BOTH)
     app4._apply_txmode()
@@ -170,7 +170,7 @@ try:
     chk("provenance is stable with two sources active", len(seen) == 1,
         str(seen))
 
-    # ── the log records airtime, including losses ────────────────────────────
+    # the log records airtime, including losses
     chk("the log is capped", len(app4._log) <= S._LOG_MAX,
         f"{len(app4._log)} <= {S._LOG_MAX}")
     chk("the log holds the transmitted hex",
@@ -197,7 +197,7 @@ try:
     chk("a fully lossy 1090 channel yields no track", not app5._tracks,
         str(list(app5._tracks)))
 
-    # ── a bad config must not stop the simulator ─────────────────────────────
+    # a bad config must not stop the simulator
     import tempfile, os
     bad = os.path.join(tempfile.mkdtemp(), "bad.cfg")
     with open(bad, "w") as fh:
@@ -220,7 +220,7 @@ try:
         str(kinds(app6)))
     app6.destroy()
 
-    # ── structural: the custom path reuses the shared physical layer ─────────
+    # structural: the custom path reuses the shared physical layer
     tx = src.split("# 4. 1090 MHz")[1].split("# 5. Refresh")[0]
     chk("custom frames go through the same channel as ADS-B",
         tx.count("channel.deliver_adsb") == 2, str(tx.count("channel.deliver_adsb")))

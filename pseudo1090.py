@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Custom 1090 MHz message format — config-driven codec
-====================================================
+
 Reuses the ADS-B physical layer so no new hardware is needed: the same 1090 MHz
 transceivers, the same 112-bit Mode S frame, the same CRC-24.  Only the
 *content* changes — all 88 payload bits are defined by `pseudo1090.cfg` rather
@@ -21,7 +21,6 @@ to surprise you at runtime:
     which field carries the aircraft address.  Mark it `role = address`.
 
 Editing the config
-------------------
 Field lines are positional:
 
     <name> = <offset> <width> <encoding> <source> [role=...]
@@ -69,12 +68,12 @@ class DecodeError(Exception):
     """A frame that does not decode under this format."""
 
 
-# ── 6-bit character set (same alphabet ADS-B and BDS 2,0 use) ─────────────────
+# 6-bit character set (same alphabet ADS-B and BDS 2,0 use)
 
 _CHARSET = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ#####_###############0123456789######"
 
 
-# ── Telemetry sources ─────────────────────────────────────────────────────────
+# Telemetry sources
 #
 # What an aircraft can supply to a field.  Keeping this an explicit table means
 # a typo in the config is an error naming the valid options, not a silent zero.
@@ -98,7 +97,7 @@ SOURCES = {
 ENCODINGS = ("uint", "int", "scaled", "ascii6", "octal", "flag", "const")
 
 
-# ── Field ─────────────────────────────────────────────────────────────────────
+# Field
 
 class Field:
     """One bit-field: where it lives, how it is encoded, where its value comes
@@ -117,7 +116,7 @@ class Field:
         self.role = role
         self.section = section
 
-    # -- resolution helpers ------------------------------------------------
+    # resolution helpers
 
     @property
     def span(self):
@@ -131,7 +130,7 @@ class Field:
             return self.param / float((1 << (self.width - 1)) - 1)
         return None
 
-    # -- value <-> raw bits ------------------------------------------------
+    # value <-> raw bits
 
     def encode(self, value):
         """Python value -> the unsigned integer that goes in the bits."""
@@ -221,7 +220,7 @@ class Field:
         return str(value)
 
 
-# ── Message ───────────────────────────────────────────────────────────────────
+# Message
 
 class Message:
     """One message type: its fields and its transmit schedule."""
@@ -242,7 +241,7 @@ class Message:
         return None
 
 
-# ── Format ────────────────────────────────────────────────────────────────────
+# Format
 
 class Format:
     """A whole custom format: the container, the discriminator, and the
@@ -257,7 +256,7 @@ class Format:
         self.messages = messages              # dict name -> Message
         self._addr = address_msg_field        # (msg_name, field_name) or None
 
-    # -- introspection -----------------------------------------------------
+    # introspection
 
     @property
     def has_address(self):
@@ -295,7 +294,7 @@ class Format:
                            f"  <- {f.source}{res_s}")
         return "\n".join(out)
 
-    # -- codec -------------------------------------------------------------
+    # codec
 
     def encode(self, msg_name, ac):
         """Build one frame for `msg_name` from aircraft `ac`.  Returns 28 hex
@@ -382,7 +381,7 @@ class Format:
         return None if v is None else int(v)
 
 
-# ── Loading ───────────────────────────────────────────────────────────────────
+# Loading
 
 def _parse_field(section, name, spec):
     """`<offset> <width> <encoding> <source> [role=x]` -> Field."""
@@ -646,7 +645,7 @@ def load(path=None, strict=True):
     return (f, []) if not strict else f
 
 
-# ── CLI ───────────────────────────────────────────────────────────────────────
+# CLI
 
 def _check(path):
     fmt, errs = load(path, strict=False)

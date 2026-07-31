@@ -14,7 +14,7 @@ chk = suite.chk
 
 src = source("simulator.py")
 
-# ── 2.1 modes_addr is the single source of truth ─────────────────────────────
+# 2.1 modes_addr is the single source of truth
 chk("2.1 icao is derived, not stored", '"icao"' not in src.split("class SimAircraft")[1].split("def __init__")[0])
 ac = S.SimAircraft()
 chk("2.1 icao derives from modes_addr", ac.icao == f"{ac.modes_addr:06X}", ac.icao)
@@ -59,7 +59,7 @@ try:
     chk("2.1 rejected rename restores field", app._v_icao.get() == b.icao,
         app._v_icao.get())
 
-    # ── 2.2 one row, one TRK number for an aircraft on both sources ───────────
+    # 2.2 one row, one TRK number for an aircraft on both sources
     app2 = make_app(clock)
     c = add_ac(app2, [(51.6, -0.4), (51.7, -0.3)], speed_kt=300)
     # Field-ageing is what is under test here, not detection probability.  At
@@ -95,7 +95,7 @@ try:
     chk("2.2 M1 absent before Mode 1 is ever selected",
         trk["iff"].get("m1") is None)
 
-    # ── 2.2 switching 3/A -> Mode 1 ages SQWK out while M1 stays fresh ────────
+    # 2.2 switching 3/A -> Mode 1 ages SQWK out while M1 stays fresh
     # Stated as "M1 keeps being refreshed while SQWK does not", which is
     # phase-independent.  Asserting "m1 age <= 4 s" at an arbitrary stop time
     # would be a coin flip, since a reply only arrives once per 4 s scan.
@@ -134,7 +134,7 @@ try:
         row[m1_lo:m1_lo + 2].strip() == f"{c.mode1:02o}",
         f"{row[m1_lo:m1_lo + 2]!r} want {c.mode1:02o}")
 
-    # ── 2.3 target menu seeded from ADS-B, tagged by provenance ──────────────
+    # 2.3 target menu seeded from ADS-B, tagged by provenance
     app3 = make_app(clock)
     d = add_ac(app3, [(51.6, -0.4), (51.7, -0.3)], speed_kt=300)
     # Provenance is under test, not detection probability — match PRF to
@@ -161,7 +161,7 @@ try:
     frames(app3, clock, 120)
     chk("2.3 provenance never downgrades", app3._known_addrs[d.modes_addr] == "S")
 
-    # ── table must not recompute truth geometry ──────────────────────────────
+    # table must not recompute truth geometry
     body = src.split("def _flush_table")[1].split("def _refresh_detail")[0]
     chk("2.2 _flush_table has no ground-truth fallback",
         "last_lat" not in body and "ac.lat" not in body)

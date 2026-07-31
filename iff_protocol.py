@@ -19,7 +19,7 @@ def _load_magic():
     except Exception:
         return 0
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+# Constants
 
 HEADER_MAGIC = _load_magic()
 
@@ -74,7 +74,7 @@ _RECORD_LEN_MODE_S  = 50
 _HEADER_LEN         = 10
 
 
-# ── Target record ─────────────────────────────────────────────────────────────
+# Target record
 
 @dataclass
 class TargetRecord:
@@ -90,7 +90,7 @@ class TargetRecord:
     confidence: int = 0xFFFF
 
 
-# ── Encoders ──────────────────────────────────────────────────────────────────
+# Encoders
 
 def encode_mode_c(altitude_ft: int) -> int:
     """Pack altitude into the 16-bit Code field for Mode C replies."""
@@ -106,7 +106,7 @@ def decode_mode_c(code: int) -> int:
     return sign * mag * 25
 
 
-# ── Mode 1 code representation ────────────────────────────────────────────────
+# Mode 1 code representation
 #
 # Mode 1 is a military mission code sent as two pulse groups: A (3 bits, the
 # first octal digit, 0-7) and B (2 bits, the second octal digit, 0-3) — 5 bits
@@ -142,7 +142,7 @@ def mode1_from_wire(bits: int) -> int:
     return ((bits >> 2) << 3) | (bits & 0o3)
 
 
-# ── Pressure altitude ─────────────────────────────────────────────────────────
+# Pressure altitude
 
 STD_QNH_HPA = 1013.25
 _FT_PER_HPA = 27.0        # near sea level
@@ -167,7 +167,7 @@ def encode_mode_c_alt(geo_alt_ft, qnh_hpa=STD_QNH_HPA):
     return max(MODE_C_MIN_FT, min(MODE_C_MAX_FT, q))
 
 
-# ── Special-purpose Mode 3/A codes ────────────────────────────────────────────
+# Special-purpose Mode 3/A codes
 
 SQUAWK_HIJACK   = 0o7500
 SQUAWK_RADIO    = 0o7600
@@ -215,7 +215,7 @@ def build_reply(prt_no: int, azimuth_deg: float, mode: int,
     return header + body
 
 
-# ── Decoder (for the reply log) ───────────────────────────────────────────────
+# Decoder (for the reply log)
 
 def decode_reply(reply: bytes) -> dict:
     """Unpack a reply block into a dict (header + list of per-target dicts)."""
@@ -272,7 +272,7 @@ def format_hex(reply: bytes) -> str:
     return reply.hex(" ", 4)
 
 
-# ── Geometry helpers (shared by the aircraft-side and radar-side scripts) ──────
+# Geometry helpers (shared by the aircraft-side and radar-side scripts)
 
 def bearing_range_nm(c_lat, c_lon, lat, lon):
     """Bearing (deg from true north) and range (nm) of (lat,lon) from (c_lat,c_lon)."""
@@ -289,7 +289,7 @@ def angle_diff(a, b):
     return d - 360.0 if d > 180.0 else d
 
 
-# ── Radar → Aircraft interrogation packet ──────────────────────────────────────
+# Radar → Aircraft interrogation packet
 #
 # Private link between the two scripts (not the external 0x3301 control
 # message).  Carries the beam geometry so the aircraft-side can decide for
@@ -322,7 +322,7 @@ def unpack_interrogation(pkt: bytes) -> dict:
     }
 
 
-# ── Aircraft → Radar per-target reply ──────────────────────────────────────────
+# Aircraft → Radar per-target reply
 #
 # Header carries a sim-envelope ICAO (for track correlation — a bookkeeping
 # shortcut, not something a real classic-mode interrogation would deliver)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Codec round-trip tests
-======================
+
 Every encoder in the sim must survive a trip through its decoder.  These run
 before the receiver is wired up, so a decode bug shows here rather than as a
 mystery blank column in the track table.
@@ -31,7 +31,7 @@ def near(a, b, tol):
     return a is not None and b is not None and abs(a - b) <= tol
 
 
-# ══ IFF per-target reply ══════════════════════════════════════════════════════
+# IFF per-target reply
 
 def test_iff_roundtrip():
     print("\niff_protocol.encode_target_reply -> decode_target_reply")
@@ -130,7 +130,7 @@ def test_iff_rejects_malformed():
     chk("accepts the good frame", iff.decode_target_reply(good)["squawk"] == 0o1200)
 
 
-# ══ ADS-B frames ══════════════════════════════════════════════════════════════
+# ADS-B frames
 
 def test_adsb_ident():
     print("\naircraft_emulator.build_identification -> decode_frame")

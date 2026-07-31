@@ -12,13 +12,13 @@ import simulator as S
 suite = Suite("Phase 1 — motion, lifecycle, dead locks")
 chk = suite.chk
 
-# ── 1.8 no threading ─────────────────────────────────────────────────────────
+# 1.8 no threading
 src = source("simulator.py")
 chk("1.8 no threading import", "threading" not in src)
 chk("1.8 no self._lock", "self._lock " not in src and "self._lock." not in src)
 chk("1.8 no _tracks_lock", "_tracks_lock" not in src)
 
-# ── 1.6 fmt_alt ──────────────────────────────────────────────────────────────
+# 1.6 fmt_alt
 chk("1.6 fmt_alt(None)", S.fmt_alt(None) == "—", S.fmt_alt(None))
 chk("1.6 fmt_alt(-1000) plain", S.fmt_alt(-1000) == "-1000", S.fmt_alt(-1000))
 chk("1.6 fmt_alt(-550) rounds", S.fmt_alt(-550) == "-600", S.fmt_alt(-550))
@@ -26,7 +26,7 @@ chk("1.6 fmt_alt(3500) plain", S.fmt_alt(3500) == "3500", S.fmt_alt(3500))
 chk("1.6 fmt_alt(35000) FL", S.fmt_alt(35000) == "FL350", S.fmt_alt(35000))
 chk("1.6 fmt_alt(18000) FL", S.fmt_alt(18000) == "FL180", S.fmt_alt(18000))
 
-# ── 1.7 _MODE_FLAG keyed on constants ────────────────────────────────────────
+# 1.7 _MODE_FLAG keyed on constants
 ac = S.SimAircraft()
 chk("1.7 has_xpdr(MODE_1)", ac.has_xpdr(iff.MODE_1) is True)
 chk("1.7 has_xpdr(MODE_S_SEL)", ac.has_xpdr(iff.MODE_S_SEL) is True)
@@ -36,7 +36,7 @@ try:
 except ValueError:
     chk("1.7 unknown mode raises", True)
 
-# ── 1.1 loop mode flies the closing leg ──────────────────────────────────────
+# 1.1 loop mode flies the closing leg
 # Deliberately asymmetric quad so the closing leg wps[-1]->wps[0] is NOT a
 # cardinal bearing — a cardinal closing leg would make the heading check
 # pass trivially.
@@ -78,7 +78,7 @@ try:
         f"non-cardinal brg {_closing_brg:.2f}, worst err {worst:.2e}, "
         f"{len(hdg_on_closing)} samples")
 
-    # ── 1.2 speed 0 freezes in place ─────────────────────────────────────────
+    # 1.2 speed 0 freezes in place
     b = add_ac(app, sq, speed_kt=600)
     for _ in range(200):
         b.step(0.05)
@@ -95,7 +95,7 @@ try:
     chk("1.2 resumes from frozen point",
         iff.bearing_range_nm(frozen[0], frozen[1], b.lat, b.lon)[1] < 0.03)
 
-    # ── 1.3 duplicate waypoints do not stall ─────────────────────────────────
+    # 1.3 duplicate waypoints do not stall
     dup = [(52.0, -0.461), (52.0, -0.461), (52.0, 1.0), (52.0, 1.0), (51.0, 1.0)]
     c = add_ac(app, dup, speed_kt=600)
     start = None
@@ -115,7 +115,7 @@ try:
     el = (time.perf_counter_ns() - t0) / 1e6
     chk("1.3 all-degenerate path is bounded", el < 200, f"{el:.1f} ms for 100 steps")
 
-    # ── 1.4 track stores drain ───────────────────────────────────────────────
+    # 1.4 track stores drain
     app2 = make_app(clock)
     for _ in range(20):
         add_ac(app2, [(51.6, -0.4), (51.7, -0.3)], speed_kt=300)
@@ -141,12 +141,12 @@ try:
     frames(app3, clock, 3)
     chk("1.4 _tracks decay to empty", not app3._tracks, str(list(app3._tracks)))
 
-    # ── 1.5 minsize is sane ──────────────────────────────────────────────────
+    # 1.5 minsize is sane
     mw, mh = app.minsize()
     expect_w = S.ui.CANVAS_SZ + S._PANEL_W + S._REPLY_W + round(20 * S.ui.SCALE)
     chk("1.5 minsize not double-scaled", mw == expect_w, f"{mw} vs {expect_w}")
 
-    # ── 1.9 nits ─────────────────────────────────────────────────────────────
+    # 1.9 nits
     chk("1.9 _MIN_PRT_S matches slider floor", S._MIN_PRT_S == 5000e-6)
     chk("1.9 _DRAW_SPACING_PX used", "_DRAW_SPACING_PX * ui.scale_for" in src)
     # The detail pane must print the PRT the stored frame was encoded under,

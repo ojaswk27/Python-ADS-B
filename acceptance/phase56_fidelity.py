@@ -17,7 +17,7 @@ from aircraft_emulator import decode_frame
 
 src = source("simulator.py")
 
-# ── 5.1 Mode C quantisation and QNH ──────────────────────────────────────────
+# 5.1 Mode C quantisation and QNH
 chk("5.1 Mode C quantises to 100 ft",
     iff.encode_mode_c_alt(35049) == 35000 and iff.encode_mode_c_alt(35051) == 35100,
     f"{iff.encode_mode_c_alt(35049)} / {iff.encode_mode_c_alt(35051)}")
@@ -43,7 +43,7 @@ chk("5.1 Mode C reply is quantised, not 1 ft resolution",
 got_q = iff.decode_target_reply(ac.iff_reply(iff.MODE_C, 1, 993.25))["alt_ft"]
 chk("5.1 QNH reaches the reply", got_q != got, f"{got} vs {got_q}")
 
-# ── 5.2 Mode 1 code range ────────────────────────────────────────────────────
+# 5.2 Mode 1 code range
 chk("5.2 0o73 is the max legal Mode 1 code",
     iff.valid_mode1(0o73) and not iff.valid_mode1(0o74))
 chk("5.2 second digit is limited to 0-3",
@@ -54,7 +54,7 @@ chk("5.2 exactly 32 legal codes",
 chk("5.2 random init is always legal",
     all(iff.valid_mode1(S.SimAircraft().mode1) for _ in range(200)))
 
-# ── 5.3 ADS-B message rates and mix ──────────────────────────────────────────
+# 5.3 ADS-B message rates and mix
 clock = Clock(dt=0.05)
 clock.install()
 try:
@@ -83,7 +83,7 @@ try:
     chk("5.3 intervals are randomised, not fixed",
         "random.uniform" in src)
 
-    # ── 5.4 velocity carries a real vertical rate ────────────────────────────
+    # 5.4 velocity carries a real vertical rate
     b = S.SimAircraft(alt_ft=10000, speed_kt=450)
     b.waypoints = [(51.0, -0.4), (52.0, -0.4)]
     b.step(0.0)
@@ -115,7 +115,7 @@ try:
     chk("5.4 velocity field is named track, not heading",
         "track_deg" in source("receiver.py"))
 
-    # ── 5.5 turn rate is opt-in; instant by default ──────────────────────────
+    # 5.5 turn rate is opt-in; instant by default
     c = S.SimAircraft(speed_kt=3600)
     c.waypoints = [(51.0, -0.4), (52.0, -0.4), (52.0, 1.0)]   # 90 deg corner
     chk("5.5 default turn rate is instant", c.turn_rate_deg_s == 0.0,
@@ -154,7 +154,7 @@ try:
     chk("5.5 course still steps instantly regardless",
         abs(iff.angle_diff(c2.course(), 90.0)) < 1.0, f"course {c2.course():.1f}")
 
-    # ── 5.5 regression: no fabricated northbound heading on acquisition ──────
+    # 5.5 regression: no fabricated northbound heading on acquisition
     # An aircraft created by clicking a single waypoint has a position but no
     # course.  course() falls back to 0.0, so latching that into _hdg (or
     # emitting it in a velocity frame) made every aircraft appear northbound
@@ -193,12 +193,12 @@ try:
         all((o := n9.adsb_frame(clock.t + k)) is None or o[0] != "VEL"
             for k in [x * 0.1 for x in range(1, 60)]))
 
-    # ── 5.6 one geometry implementation ──────────────────────────────────────
+    # 5.6 one geometry implementation
     chk("5.6 no _dist_nm helper left", "_dist_nm" not in src)
     chk("5.6 no _bearing helper left", "def _bearing" not in src)
     chk("5.6 simulator uses iff.bearing_range_nm", "iff.bearing_range_nm" in src)
 
-    # ── 5.7 emergency codes and SPI ──────────────────────────────────────────
+    # 5.7 emergency codes and SPI
     chk("5.7 7500 is HIJACK", iff.emergency_label(0o7500) == "HIJACK")
     chk("5.7 7600 is RADIO FAIL", iff.emergency_label(0o7600) == "RADIO FAIL")
     chk("5.7 7700 is EMERGENCY", iff.emergency_label(0o7700) == "EMERGENCY")
@@ -235,7 +235,7 @@ try:
     app._flush_table()
     chk("5.7 SPI expires", "IDENT" not in app._tbl.get("1.0", "end"))
 
-    # ── 6.1 duplicate address alert ──────────────────────────────────────────
+    # 6.1 duplicate address alert
     app2 = make_app(clock)
     p = add_ac(app2, [(51.6, -0.4), (51.7, -0.3)], speed_kt=200)
     q = add_ac(app2, [(51.5, -0.5), (51.55, -0.45)], speed_kt=200)
@@ -250,7 +250,7 @@ try:
     chk("6.1 alert names the address",
         f"{p.modes_addr:06X}" in app2._v_status.get(), repr(app2._v_status.get()))
 
-    # ── 6.2/6.3 table bookkeeping ────────────────────────────────────────────
+    # 6.2/6.3 table bookkeeping
     ft = src.split("def _flush_table")[1].split("def _refresh_detail")[0]
     chk("6.3 _table_dirty is cleared at the END of _flush_table",
         ft.rstrip().endswith("self._table_dirty = False"),
@@ -258,7 +258,7 @@ try:
     chk("6.2 target menu refreshed inside the same pass",
         "_refresh_target_menu()" in ft)
 
-    # ── 6.4 Mode 2 is a radar-level unit code ────────────────────────────────
+    # 6.4 Mode 2 is a radar-level unit code
     app3 = make_app(clock)
     app3._v_unit2.set("7654")
     app3._apply_unit2()
@@ -272,7 +272,7 @@ try:
     chk("6.4 per-aircraft override is preserved",
         app3._aircraft[-2].mode2 == 0o1111)
 
-    # ── 6.6 regression: the target dropdown must not churn ───────────────────
+    # 6.6 regression: the target dropdown must not churn
     # _target_menu_dirty was set on every received frame, so at ~4 ADS-B msg/s
     # per aircraft the menu was deleted and re-added several times a second,
     # tearing the list out from under anyone trying to click an entry.

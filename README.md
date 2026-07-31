@@ -1,35 +1,38 @@
-# ADS-B Toolkit
+# IFF Radar + ADS-B Simulator
 
-A self-contained Python toolkit for generating, transmitting, receiving, decoding,
-and displaying ADS-B (Automatic Dependent Surveillance–Broadcast) messages over
-UDP multicast. Two GUI tools sit on top of an emulator and a hand-rolled decoder,
-and the path emulator additionally emits ASTERIX CAT021 target reports plus a
-small custom binary message that announces the radar's own location.
+A self-contained Python simulator for IFF/SSR interrogation and 1090 MHz
+downlink. One process holds the whole chain: aircraft emit encoded frames, a
+propagation channel loses or corrupts them, and a receiver builds the entire
+display by decoding only what survives. Nothing on screen reads ground truth.
 
-All ADS-B traffic flows on a single multicast group/port from `network.cfg`;
-ASTERIX traffic is unicast to a separately configurable destination.
+```bash
+python simulator.py
+```
 
 ---
 
-## Tools
+## Files
+
+Everything at the top level is part of the running simulator. Superseded
+programs live in `legacy/` and are not imported by anything here.
 
 | File | Role |
 |---|---|
-| `simulator.py` | **GUI, single process** — airspace, IFF/SSR interrogator and 1090 MHz receiver in one window. Aircraft emit encoded frames; a channel loses or corrupts them; a receiver builds the whole display by decoding what survives |
-| `channel.py` | Propagation: max range, radio horizon, frame loss, round-trip delay, Mode A/C garble |
+| `simulator.py` | **The program.** Airspace, IFF/SSR interrogator, and 1090 MHz receiver in one window |
+| `channel.py` | Propagation: max range, radio horizon, frame loss, round-trip delay, monopulse azimuth, Mode A/C garble |
 | `receiver.py` | Owns the track store. Measured range and bearing, CPR resolution. No ground-truth access |
-| `pseudo1090.py` + `pseudo1090.cfg` | **Custom 1090 MHz message format** — a config-defined format that replaces ADS-B on the same physical layer, so no new hardware is needed. `--check` validates a config, `--demo` round-trips one |
 | `iff_protocol.py` | IFF reply codec, Mode C pressure altitude, Mode 1 codes, shared geometry |
-| `path_emulator.py` | GUI path editor — draw waypoint routes (or freehand strokes); aircraft fly the paths and the program transmits ADS-B + ASTERIX CAT021 + radar-position UDP |
-| `radar_display.py` | GUI radar receiver — live PPI with fading trails, random per-target colours, track panel |
-| `radar_ui.py` | Shared UI module — palette, fonts, geometry, scale-aware drawing primitives |
+| `aircraft_emulator.py` | ADS-B frame builders and `decode_frame`; also runs standalone as a headless fleet emitter |
 | `adsb_decoder.py` | Pure-stdlib Mode S decoder — single hex, file, dump1090 TCP, or UDP multicast |
-| `aircraft_emulator.py` | Headless scripted fleet emulator (no GUI), plus the ADS-B frame builders and `decode_frame` |
-| `cat21.py` | Minimal ASTERIX CAT021 (Target Reports) encoder used by `path_emulator.py` |
-| `net_config.py` | Shared config loader for `network.cfg` |
-| `acceptance/` | Suites driving the real application; `python acceptance/run_all.py` |
-| `test_codecs.py`, `test_pseudo1090.py`, `test_velocity.py` | Codec round-trip tests, no display needed |
-| `decoder_pseudocode.txt` | Plain-English walkthrough of the decoder's core for reference |
+| `pseudo1090.py` + `pseudo1090.cfg` | **Custom 1090 MHz message format** — a config-defined format that replaces ADS-B on the same physical layer, so no new hardware is needed. `--check` validates a config, `--demo` round-trips one |
+| `radar_ui.py` | Shared UI module — palette, fonts, geometry, scale-aware drawing primitives |
+| `net_config.py` + `network.cfg` | Config loader for the UDP endpoints used by `adsb_decoder --multicast` and the standalone emitter |
+| `acceptance/` | Suites driving the real application; `python acceptance/run_all.py` (needs a display) |
+| `test_codecs.py`, `test_pseudo1090.py` | Codec round-trip tests, no display needed |
+| `legacy/` | The superseded multi-process tools — see `legacy/README.md` |
+| `docs/reference.md` | Every major function in the above, one line each |
+
+See **[`docs/reference.md`](docs/reference.md)** for the per-function reference.
 
 ---
 
@@ -93,30 +96,22 @@ source .venv/bin/activate
 
 ---
 
-## Running the tools
+## Running
 
-All four programs print full `--help` text. Anything not given on the command line
-falls back to `network.cfg`, then to a hard-coded default.
-
-### `path_emulator.py` — GUI sensor / emulator
+### `simulator.py` — the simulator
 
 ```bash
-python path_emulator.py
-python path_emulator.py --centre 51.5,-0.5 --range 150
-python path_emulator.py --declination 1.5 \
-                       --asterix-host 192.168.1.20 --asterix-port 8600
+python simulator.py
+python simulator.py --centre 28,77 --range 150
+python simulator.py --format-cfg my_format.cfg
 ```
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--group GROUP` | `network.cfg` (`239.255.0.1`) | ADS-B multicast group to transmit on |
-| `--port PORT` | `network.cfg` (`30003`) | ADS-B multicast port |
-| `--iface IFACE` | `network.cfg` (`127.0.0.1`) | Local interface for multicast |
-| `--centre LAT,LON` | `51.477,-0.461` | Centre of the radar PPI (sensor location) |
+| `--centre LAT,LON` | `51.477,-0.461` | Radar site position (also changeable at runtime) |
 | `--range RANGE` | `200.0` | Disc radius in nautical miles |
-| `--declination DEG` | `0.0` | Magnetic declination °E; converts true track → magnetic for the on-screen / CAT21 readout |
-| `--asterix-host IP` | `network.cfg` (`127.0.0.1`) | Unicast IP for CAT021 + the 12-byte radar-position message |
-| `--asterix-port PORT` | `network.cfg` (`8600`) | Unicast port for the same |
+| `--declination DEG` | `0.0` | Magnetic declination °E; converts true track → magnetic for the readout |
+| `--format-cfg PATH` | `pseudo1090.cfg` | Custom 1090 MHz message format |
 
 **Controls**
 
@@ -128,46 +123,16 @@ python path_emulator.py --declination 1.5 \
 | Right-click a waypoint | delete it |
 | Right-click empty canvas | toggle the hover crosshair on/off |
 | Aircraft list / address / callsign fields | select and rename a track |
+| IFF fields | Mode 1 (5-bit), Mode 2 and 3/A (12-bit) squawks, Mode S address |
+| M1 / M2 / M3-A / MC / MS checkboxes | switch individual transponder modes on and off |
 | alt / speed sliders | live update of the selected aircraft |
 | loop checkbox | close the path into a loop (off = fly start→end and hold) |
 | Hover | crosshair with exact lat/lon under the pointer |
 | F11 / Esc | toggle / leave fullscreen (radar autoscales) |
 | Reset positions (red) | rewind every aircraft to the start of its path |
 
-**Outputs from `path_emulator.py`**
-
-| Stream | Destination | Cadence |
-|---|---|---|
-| ADS-B raw hex (`*HEX;\n`) | multicast `--group:--port` | continuous, ~per-aircraft round-robin |
-| ASTERIX CAT021 data blocks | unicast `--asterix-host:--asterix-port` | one block per second containing one record per active target |
-| 12-byte radar-position message | unicast `--asterix-host:--asterix-port` | 8 packets at 500 ms intervals during startup (4 s burst) |
-
-### `radar_display.py` — GUI radar receiver
-
-```bash
-python radar_display.py
-python radar_display.py --centre 51.5,-0.5 --range 150
-```
-
-| Flag | Default | Purpose |
-|---|---|---|
-| `--group GROUP` | `network.cfg` (`239.255.0.1`) | ADS-B multicast group to listen on |
-| `--port PORT` | `network.cfg` (`30003`) | ADS-B multicast port |
-| `--iface IFACE` | `network.cfg` (`127.0.0.1`) | Local interface for multicast |
-| `--centre LAT,LON` | `51.477,-0.461` | Centre of the PPI |
-| `--range RANGE` | `200.0` | Disc radius in nautical miles |
-
-**Controls**
-
-| Action | Result |
-|---|---|
-| lat / lon / range entries + Apply | recentre/rescale the PPI |
-| Clear screen (red) | drop all current tracks and trails (RX keeps running) |
-| F11 / Esc | toggle / leave fullscreen (radar autoscales) |
-
-Each target is assigned a random vivid colour on first sight (golden-ratio hue
-spread to avoid lookalikes); the colour fades with message age (0–3 s full,
-3–10 s mid, 10–30 s dim, then culled).
+The right-hand panel scrolls; it holds the aircraft editor, the **RADAR SITE**
+controls, the **1090 FORMAT** selector, and the **1090 AIRTIME** log.
 
 ### `aircraft_emulator.py` — headless scripted fleet
 
@@ -211,45 +176,37 @@ them the decoder runs through its built-in demo frames.
 ### Tests
 
 ```bash
-python -m unittest test_velocity -v
+python test_codecs.py            # IFF + ADS-B codec round-trips
+python test_pseudo1090.py        # custom-format codec
+python acceptance/run_all.py     # drives the real application; needs a display
 ```
+
+The acceptance suites step a real Tk window on a monkeypatched clock and assert
+against the running program, not a mock. See `acceptance/README.md`.
 
 ---
 
 ## Network configuration
 
-Edit `network.cfg` to change defaults. Every CLI flag still overrides whatever is
-in this file.
+`simulator.py` uses no network. `network.cfg` supplies defaults for the parts
+that do: `adsb_decoder.py --multicast`, `aircraft_emulator.py` run standalone,
+and the tools in `legacy/`. Every CLI flag overrides it.
 
 ```ini
 # ADS-B multicast network settings
 group = 239.255.0.1
 port  = 30003
 iface = 127.0.0.1     # loopback — change to a LAN interface for real hardware
-
-# ASTERIX CAT021 + radar-position output (path_emulator, unicast UDP)
-asterix_host = 127.0.0.1
-asterix_port = 8600
 ```
-
----
-
-## Output formats
-
-`path_emulator.py` emits three UDP streams: a public ADS-B raw hex feed
-(dump1090-compatible framing), an ASTERIX CAT021 target-report block, and a
-short startup burst announcing the radar's own position. Byte-level layouts
-are not included in this README; refer to the source in `cat21.py`,
-`iff_protocol.py`, and `iff_interrogation.py` for the encoded fields.
 
 ---
 
 ## UI scaling
 
-`radar_ui.SCALE` (default `2`) sets the baseline pixel density for both GUI
-tools. On top of that, both windows are resizable and the radar disc, blips,
-labels, and fonts all scale dynamically with the live canvas size — F11 enters
-fullscreen, Esc leaves it. The side panel keeps a fixed width for readability.
+`radar_ui.SCALE` (default `2`) sets the baseline pixel density. On top of that
+the window is resizable and the radar disc, blips, labels, and fonts all scale
+dynamically with the live canvas size — F11 enters fullscreen, Esc leaves it.
+The side panel keeps a fixed width for readability and scrolls vertically.
 
 ---
 
@@ -272,13 +229,26 @@ parity field.
 ≤4088 kt). Component magnitudes are rounded (not truncated) so quantisation
 error is centred around zero.
 
-**Threading model** — TX and RX threads write only to plain Python attributes
-guarded by a lock; all tkinter calls happen on the main thread. The render
-loop is layered: a cached background (rings + lat/lon grid) and a cached route
-layer are rebuilt only on view/edit changes; only the per-frame blip/label
-layer is redrawn each tick. This keeps a fullscreen Retina canvas from
-recompositing the whole scene every frame.
+**The ground-truth barrier** — only the physics step and `channel.py` may read
+`ac.lat` / `ac.mode3a` and friends. Everything the display shows arrives as an
+encoded frame that survived the channel, so the visible consequences are real
+ones: plots step once per scan rather than sliding continuously, an ADS-B track
+has no position until a CPR even/odd pair resolves, a silent aircraft draws no
+blip, and range comes from measured round-trip delay rather than from geometry.
 
-**Per-target colours** — both tools draw each track in a vivid hue chosen from
-a low-discrepancy (golden-ratio) sequence, so two simultaneously visible
-targets never land on near-identical colours.
+**Monopulse azimuth** — a reply's reported bearing is the true bearing plus a
+small estimation error (≈0.1° on boresight, degrading toward the beam edges),
+not the beam pointing angle. Reporting the pointing angle instead leaves an
+error of up to half a beamwidth — about 300 m of cross-range at 3° and 25 nm —
+that jumps from scan to scan as the PRT grid drifts against the target.
+`RadarSite.monopulse = False` selects the older sliding-window behaviour.
+
+**No threads** — everything runs on the Tk main thread in a single `_frame()`
+step, which is what makes the acceptance suites able to own the clock. The
+render loop is layered: a cached background (rings + lat/lon grid) and a cached
+route layer are rebuilt only on view/edit changes; only the per-frame
+blip/label layer is redrawn each tick.
+
+**Per-target colours** — each track is drawn in a vivid hue chosen from a
+low-discrepancy (golden-ratio) sequence, so two simultaneously visible targets
+never land on near-identical colours.

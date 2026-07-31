@@ -1,6 +1,6 @@
 """
 Shared harness for the acceptance suites
-========================================
+
 Each suite in this directory checks one phase of the correctness & fidelity
 work against the running application, not against a mock.  That means driving
 a real Tk window, so a display is required.
@@ -39,7 +39,7 @@ import iff_protocol as iff       # noqa: E402,F401  (re-exported)
 _real_monotonic = time.monotonic
 
 
-# ── source inspection ─────────────────────────────────────────────────────────
+# source inspection
 
 def source(name):
     """Read one of the project's source files, for the handful of checks that
@@ -49,7 +49,7 @@ def source(name):
         return fh.read()
 
 
-# ── deterministic clock ───────────────────────────────────────────────────────
+# deterministic clock
 
 class Clock:
     """A monotonic clock the test advances by hand."""
@@ -74,7 +74,7 @@ class Clock:
         self.t += secs
 
 
-# ── application under test ────────────────────────────────────────────────────
+# application under test
 
 def make_app(clock, rng=200.0):
     app = S.CombinedApp(51.477, -0.461, rng, 0.0)
@@ -112,7 +112,7 @@ def match_prf(app, rpm=30, prt_us=5000):
     app._v_prt.set(prt_us)
 
 
-# ── result recording ──────────────────────────────────────────────────────────
+# result recording
 
 class Suite:
     """Collects check results and reports a single exit status."""

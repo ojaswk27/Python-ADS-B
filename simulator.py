@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 IFF Radar + Aircraft Simulator (single-process)
-================================================
+
 Combines the radar interrogator, the aircraft waypoint editor, and the ADS-B
 emitter into one self-contained window.  Every aircraft simultaneously:
   • follows a waypoint path
@@ -11,7 +11,6 @@ emitter into one self-contained window.  Every aircraft simultaneously:
 No UDP — everything runs in-process on the Tk main thread.
 
 Controls
---------
     Left-click canvas   add a single waypoint (auto-creates aircraft if none)
     Click-drag canvas   draw a freehand path (samples points as you drag)
     Drag waypoint dot   reposition that waypoint
@@ -25,7 +24,6 @@ Controls
     F11 / Esc           toggle / leave fullscreen
 
 Usage
------
     python simulator.py
     python simulator.py --centre 28,77 --range 150
     python simulator.py --declination 1.5
@@ -46,7 +44,7 @@ from aircraft_emulator import build_identification, build_position, build_veloci
 from receiver import Receiver
 
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+# Constants
 
 _PANEL_W    = 280 * ui.SCALE
 _REPLY_W    = 250 * ui.SCALE
@@ -181,7 +179,7 @@ def fmt_alt(ft):
     return f"{int(round(ft / 100.0)) * 100:d}"
 
 
-# ── Aircraft model ────────────────────────────────────────────────────────────
+# Aircraft model
 
 _ctr = [0]
 
@@ -372,7 +370,7 @@ class SimAircraft:
         self._lat, self._lon = wps[0]
         self._seg_t = 0.0
 
-    # ── Emitter ───────────────────────────────────────────────────────────────
+    # Emitter
     #
     # These two methods are the ONLY way aircraft state reaches the display.
     # Nothing outside this class may read .lat/.lon/.mode3a/.alt_ft on the
@@ -492,7 +490,7 @@ class SimAircraft:
                 build_position(icao, self._lat, self._lon, alt, odd))
 
 
-# ── App ───────────────────────────────────────────────────────────────────────
+# App
 
 class CombinedApp(tk.Tk):
 
@@ -631,7 +629,7 @@ class CombinedApp(tk.Tk):
     def _on_close(self):
         self.destroy()
 
-    # ── 1090 MHz airtime log ──────────────────────────────────────────────────
+    # 1090 MHz airtime log
 
     def _log_1090(self, kind, label, frame, decoded=True, lost=False):
         """Record one transmission.  Append-only and capped, unlike every other
@@ -753,7 +751,7 @@ class CombinedApp(tk.Tk):
         self._fmt_lbl.config(
             fg=_DWELL_LOW_COL if not self.fmt.has_address else ui.FG_DIM)
 
-    # ── 1090 airtime log ──────────────────────────────────────────────────────
+    # 1090 airtime log
 
     _LOG_FMT = "{t:>7} {kind:<6} {label:<9} {st:<4} {hex}"
 
@@ -786,7 +784,7 @@ class CombinedApp(tk.Tk):
                             f"{rx.undecodable} undec  "
                             f"{rx.unattributed} unattr")
 
-    # ── Track store (owned by the receiver) ───────────────────────────────────
+    # Track store (owned by the receiver)
 
     @property
     def _tracks(self):
@@ -802,7 +800,7 @@ class CombinedApp(tk.Tk):
             col = self._colors[addr] = ui.random_color()
         return col
 
-    # ── Panel UI ──────────────────────────────────────────────────────────────
+    # Panel UI
 
     def _button(self, parent, text, cmd, bg=ui.BTN, fg=ui.FG, active=None):
         b = ui.flat_button(parent, text, cmd, bg=bg, fg=fg, active=active)
@@ -810,7 +808,7 @@ class CombinedApp(tk.Tk):
         return b
 
     def _build_ui(self):
-        # ── Left panel: LAST REPLY ────────────────────────────────────────────
+        # Left panel: LAST REPLY
         lp = ui.make_panel(self, side=tk.LEFT, width=_REPLY_W)
         self._left_panel = lp
 
@@ -841,7 +839,7 @@ class CombinedApp(tk.Tk):
                             "ADS-B  (click a track)")
         self._detail.config(state=tk.DISABLED)
 
-        # ── Left panel, lower half: 1090 MHz airtime ──────────────────────────
+        # Left panel, lower half: 1090 MHz airtime
         # The only append-only view in the app.  Everything else here is a
         # snapshot rebuilt each refresh; this is a running record of what was
         # actually transmitted and whether the receiver made sense of it.
@@ -871,7 +869,7 @@ class CombinedApp(tk.Tk):
         self._log_scroll.place(in_=self._log_txt, relx=1.0, rely=0,
                                relheight=1.0, anchor="ne")
 
-        # ── Canvas ────────────────────────────────────────────────────────────
+        # Canvas
         self.cv = tk.Canvas(self, width=ui.CANVAS_SZ, height=ui.CANVAS_SZ,
                             bg=ui.BG, cursor="crosshair", highlightthickness=0)
         self.cv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -889,7 +887,7 @@ class CombinedApp(tk.Tk):
         p = ui.make_scroll_panel(self, side=tk.RIGHT, width=_PANEL_W)
         self._panel = p
 
-        # ── RADAR SITE ──
+        # RADAR SITE
         tk.Frame(p, bg=ui.PANEL, height=round(10 * ui.SCALE)).pack()
         tk.Label(p, text="RADAR SITE", bg=ui.PANEL, fg=ui.FG,
                  font=ui.F_MD, anchor="w").pack(fill=tk.X, padx=ui.PAD)
@@ -906,7 +904,7 @@ class CombinedApp(tk.Tk):
         self._site_lbl.pack(fill=tk.X, padx=ui.PAD)
         self._button(p, "Centre on selected", self._centre_on_selected)
 
-        # ── 1090 FORMAT ──
+        # 1090 FORMAT
         ui.sep(p)
         tk.Label(p, text="1090 FORMAT", bg=ui.PANEL, fg=ui.FG,
                  font=ui.F_MD, anchor="w").pack(fill=tk.X, padx=ui.PAD)
@@ -929,7 +927,7 @@ class CombinedApp(tk.Tk):
         self._fmt_lbl.pack(fill=tk.X, padx=ui.PAD, pady=(0, ui.PAD2))
         self._button(p, "Reload format cfg", self._reload_fmt)
 
-        # ── INTERROGATION ──
+        # INTERROGATION
         ui.sep(p)
         tk.Label(p, text="INTERROGATION", bg=ui.PANEL, fg=ui.FG,
                  font=ui.F_MD, anchor="w").pack(fill=tk.X, padx=ui.PAD)
@@ -977,7 +975,7 @@ class CombinedApp(tk.Tk):
                                     fg=ui.FG_DIM, font=ui.F_SM, anchor="w")
         self._status_lbl.pack(fill=tk.X, padx=ui.PAD, pady=(0, ui.PAD2))
 
-        # ── AIRCRAFT ──
+        # AIRCRAFT
         ui.sep(p)
         tk.Label(p, text="AIRCRAFT", bg=ui.PANEL, fg=ui.FG,
                  font=ui.F_MD, anchor="w").pack(fill=tk.X, padx=ui.PAD)
@@ -1018,7 +1016,7 @@ class CombinedApp(tk.Tk):
                        activebackground=ui.PANEL,
                        command=self._toggle_loop).pack(side=tk.LEFT)
 
-        # ── IFF ──
+        # IFF
         ui.sep(p)
         tk.Label(p, text="IFF", bg=ui.PANEL, fg=ui.FG_DIM,
                  font=ui.F_MD, anchor="w").pack(fill=tk.X, padx=ui.PAD)
@@ -1064,7 +1062,7 @@ class CombinedApp(tk.Tk):
         self._button(p, "Reset positions", self._reset_positions,
                      bg=ui.BTN_RED, fg="#ffffff", active=ui.BTN_RED_A)
 
-        # ── TRACKS ──
+        # TRACKS
         ui.sep(p)
         tk.Label(p, text="TRACKS", bg=ui.PANEL, fg=ui.FG,
                  font=ui.F_MD, anchor="w").pack(fill=tk.X, padx=ui.PAD)
@@ -1106,7 +1104,7 @@ class CombinedApp(tk.Tk):
                  font=ui.F_SM, anchor="w"
                  ).pack(fill=tk.X, padx=ui.PAD, pady=(0, round(6 * ui.SCALE)))
 
-    # ── Coordinate helpers ────────────────────────────────────────────────────
+    # Coordinate helpers
 
     def _to_xy(self, lat, lon):
         cx, cy, r = ui.geom(self._cw, self._ch)
@@ -1146,7 +1144,7 @@ class CombinedApp(tk.Tk):
     def _on_resize(self, ev):
         self._cw, self._ch = ev.width, ev.height
 
-    # ── Canvas interaction ────────────────────────────────────────────────────
+    # Canvas interaction
 
     def _press(self, ev):
         if self._selected is not None:
@@ -1221,7 +1219,7 @@ class CombinedApp(tk.Tk):
         else:
             self._cursor_on = not self._cursor_on
 
-    # ── Aircraft management ───────────────────────────────────────────────────
+    # Aircraft management
 
     def _new_ac(self):
         ac = SimAircraft(mode2=self._unit2)
@@ -1385,7 +1383,7 @@ class CombinedApp(tk.Tk):
             ac._adsb_due.clear()
             ac._pseudo_due.clear()
 
-    # ── Sweep azimuth ─────────────────────────────────────────────────────────
+    # Sweep azimuth
 
     def _azimuth_now(self):
         t   = time.monotonic()
@@ -1400,7 +1398,7 @@ class CombinedApp(tk.Tk):
         return (self._sweep_anchor_az +
                 (t - self._sweep_anchor_t) * rpm * 6.0) % 360.0
 
-    # ── Mode selection ────────────────────────────────────────────────────────
+    # Mode selection
 
     def _current_mode(self):
         for lbl, code in _MODE_LABELS:
@@ -1408,7 +1406,7 @@ class CombinedApp(tk.Tk):
                 return code
         return iff.MODE_3A
 
-    # ── Interrogation ─────────────────────────────────────────────────────────
+    # Interrogation
 
     def _run_interrogation(self, now, dt):
         prt_s = max(self._prt_s_snap, _MIN_PRT_S)
@@ -1512,7 +1510,7 @@ class CombinedApp(tk.Tk):
             if self.rx.rx_iff(frame, t, t_rx, brg_meas) is not None:
                 self._table_dirty = True
 
-    # ── Target menu ───────────────────────────────────────────────────────────
+    # Target menu
 
     def _refresh_target_menu(self):
         """Rebuild the selective-target dropdown ONLY when its entries change.
@@ -1557,7 +1555,7 @@ class CombinedApp(tk.Tk):
         if cur not in self._target_menu_map:
             self._v_target.set(labels[0])
 
-    # ── Drawing ───────────────────────────────────────────────────────────────
+    # Drawing
 
     def _view_sig(self):
         return (round(self.c_lat, 6), round(self.c_lon, 6),
@@ -1788,7 +1786,7 @@ class CombinedApp(tk.Tk):
             cv.create_line(pts[-1][0], pts[-1][1], pts[0][0], pts[0][1],
                            fill=leg, tags="route")
 
-    # ── Track table ───────────────────────────────────────────────────────────
+    # Track table
 
     _COL_FMT = ("{trk:>3} {call:<8} {addr:>6} {sqwk:>4} {m1:>2} {m2:>4} "
             "{alt:>5} {rng:>5} {brg:>3} {age:>4}")
@@ -1951,7 +1949,7 @@ class CombinedApp(tk.Tk):
         t.insert(tk.END, f"TRK{trk['trk_no']:03d}   {addr:06X}\n", "hdr")
         t.insert(tk.END, f"address via {prov}\n\n", "stale")
 
-        # ── IFF: every field this radar has managed to accumulate ──
+        # IFF: every field this radar has managed to accumulate
         if di.get("last_ts") is None:
             t.insert(tk.END, "IFF   (no reply yet)\n\n", "stale")
         else:
@@ -1969,7 +1967,7 @@ class CombinedApp(tk.Tk):
             field("CALL", "call", di)
             t.insert(tk.END, "\n")
 
-        # ── Measured plot: range from delay, bearing from the beam ──
+        # Measured plot: range from delay, bearing from the beam
         if not dp:
             t.insert(tk.END, "PLOT  (no measured plot)\n\n", "stale")
         else:
@@ -1982,7 +1980,7 @@ class CombinedApp(tk.Tk):
                              f"  {self._mag(dp['brg_deg']):06.2f}°M\n", tag)
             t.insert(tk.END, "\n")
 
-        # ── ADS-B state ──
+        # ADS-B state
         if da.get("last_ts") is None:
             t.insert(tk.END, "ADSB  (no message yet)\n", "stale")
         else:
@@ -1998,7 +1996,7 @@ class CombinedApp(tk.Tk):
             if da.get("lat") is None:
                 t.insert(tk.END, "  CPR   awaiting even/odd pair\n", "stale")
 
-        # ── Custom 1090 format ──
+        # Custom 1090 format
         dc = trk["pseudo"]
         if dc.get("last_ts") is not None:
             t.insert(tk.END, f"\nC1090 last {dc.get('last_type', '?')}"
@@ -2032,7 +2030,7 @@ class CombinedApp(tk.Tk):
 
         t.config(state=tk.DISABLED)
 
-    # ── Selection from canvas / table ─────────────────────────────────────────
+    # Selection from canvas / table
 
     def _on_table_click(self, ev):
         idx = self._tbl.index(f"@{ev.x},{ev.y}")
@@ -2048,7 +2046,7 @@ class CombinedApp(tk.Tk):
                 self._selected_addr = addr
                 self._table_dirty = True
 
-    # ── Main loop ─────────────────────────────────────────────────────────────
+    # Main loop
 
     def _loop(self):
         self._frame()
@@ -2144,7 +2142,7 @@ class CombinedApp(tk.Tk):
             self._flush_log()
             self._table_last = now
 
-    # ── Fullscreen ────────────────────────────────────────────────────────────
+    # Fullscreen
 
     def _toggle_fullscreen(self, _ev=None):
         self._fullscreen = not self._fullscreen
@@ -2155,7 +2153,7 @@ class CombinedApp(tk.Tk):
         self.attributes("-fullscreen", False)
 
 
-    # ── Entry point ───────────────────────────────────────────────────────────────
+    # Entry point
 
 def main():
     p = argparse.ArgumentParser(description="IFF Radar + Aircraft Simulator (merged)",

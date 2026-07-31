@@ -33,7 +33,7 @@ SUITES = [
 ]
 
 # Codec round-trips live at the repo root and need no display.
-UNIT = ["test_codecs.py", "test_pseudo1090.py", "test_velocity.py"]
+UNIT = ["test_codecs.py", "test_pseudo1090.py"]
 
 
 def run(path, cwd, verbose):

@@ -1,63 +1,58 @@
 #!/usr/bin/env python3
 """
-ADS-B Path Emulator
-===================
-Click waypoints on the radar canvas to build a flight route.
-Aircraft follow their path and transmit ADS-B over UDP multicast.
+Aircraft Simulator
+==================
+Click / drag waypoints on the radar canvas to build flight routes; aircraft
+follow them.  This is the *aircraft side* of the IFF simulation pair — it owns
+aircraft ground truth and IFF state, and answers interrogations received from
+an `iff_radar.py` process over UDP.  It has no knowledge of the radar's beam
+position beyond what each interrogation packet tells it, and it never reads
+the radar's state directly: the two processes only talk over the network.
+
+Forked from path_emulator.py minus all UDP transmit threads, plus per-aircraft
+IFF state (Mode 1/2/3-A squawks, Mode S address, transponder capability flags)
+and the interrogation-reply link to iff_radar.py.
 
 Controls
 --------
     Left-click canvas   add a single waypoint (auto-creates aircraft if none)
     Click-drag canvas   draw a freehand path (samples points as you drag)
     Drag waypoint dot   reposition that waypoint
-    Right-click dot     delete waypoint
+    Right-click dot     delete waypoint  /  R-click empty: toggle crosshair
     loop checkbox       close the path into a loop (off = open path)
     Panel list          select aircraft
     address / callsign  edit ICAO + callsign (Enter or click away to apply)
+    IFF fields          Mode 1 (5-bit), Mode 2 / 3-A (12-bit) squawks; Mode S addr
+    capability flags    M1 / M2 / M3-A / MC / MS transponder on/off
     alt / speed sliders update altitude / speed live
-    F11 / Esc           toggle / leave fullscreen (radar autoscales)
-    Hover               crosshair shows exact lat/lon under the pointer
-
-Outputs
--------
-    ADS-B raw hex   → UDP multicast
-    ASTERIX CAT021  → unicast --asterix-host:--asterix-port
-    Radar position  → short burst at startup
+    F11 / Esc           toggle / leave fullscreen
 
 Usage
 -----
-    python path_emulator.py
-    python path_emulator.py --centre 51.5,-0.5 --range 150
-    python path_emulator.py --declination 1.5 --asterix-host 192.168.1.20 --asterix-port 8600
+    python aircraft_sim.py
+    python aircraft_sim.py --centre 51.5,-0.5 --range 150 --declination 1.5
 """
 
 import argparse
 import math
-import os
+import random
 import socket
-import struct
-import sys
 import threading
 import time
 import tkinter as tk
 
-import cat21
+# Superseded by simulator.py and moved into legacy/.  The shared modules this
+# program still uses (radar_ui, net_config, adsb_decoder, ...) stayed at the
+# repo root, so put the root on the path before importing them.
+import os as _os
+import sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+
+import adsb_source
+import iff_protocol as iff
 import net_config
 import radar_ui as ui
-from aircraft_emulator import build_identification, build_position, build_velocity
-
-
-def _load_magic():
-    d = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".formats")
-    if d not in sys.path:
-        sys.path.insert(0, d)
-    try:
-        import magic  # type: ignore
-        return magic.RADAR_POSITION_MSG_ID
-    except Exception:
-        return 0
-
-_RADAR_POS_MSG_ID = _load_magic()
+import udp_endpoints as udp
 
 
 # ── Path-specific palette ─────────────────────────────────────────────────────
@@ -105,11 +100,26 @@ def _new_id():
 
 
 class WaypointAircraft:
-    """Follows an ordered waypoint list; position interpolated by speed."""
+    """Follows an ordered waypoint list; position interpolated by speed.
+
+    Carries per-aircraft IFF state, answered only through the interrogation
+    link to iff_radar.py — never read directly by the radar process:
+      mode1              — 5-bit military mission code (0-31)
+      mode2, mode3a       — 12-bit codes (unit code / civil squawk)
+      modes_addr        — 24-bit Mode S address (defaults to int(icao, 16))
+      xpdr1/2/3a/c/s    — capability flags; if False, this aircraft does not
+                          reply to that interrogation mode (non-cooperative).
+    """
 
     __slots__ = ("icao", "callsign", "track_no", "color",
                  "waypoints", "alt_ft", "speed_kt",
-                 "loop", "_seg", "_seg_t", "_lat", "_lon", "_mi")
+                 "loop", "_seg", "_seg_t", "_lat", "_lon", "_mi",
+                 "mode1", "mode2", "mode3a", "modes_addr",
+                 "xpdr1", "xpdr2", "xpdr3a", "xpdrC", "xpdrS")
+
+    # Map IFF protocol mode codes → which capability flag gates them.
+    _MODE_FLAG = {1: "xpdr1", 2: "xpdr2", 3: "xpdr3a", 4: "xpdrC",
+                  5: "xpdrS", 6: "xpdrS"}
 
     def __init__(self, alt_ft=35_000, speed_kt=450):
         self.icao, self.callsign, self.track_no = _new_id()
@@ -123,6 +133,19 @@ class WaypointAircraft:
         self._lat      = None
         self._lon      = None
         self._mi       = 0
+
+        # IFF: random defaults; user can override via the per-aircraft panel.
+        # Mode 1 is a 5-bit military mission code (0-31); Mode 2 and Mode 3/A
+        # are both 12-bit (unit code / civil squawk respectively).
+        self.mode1      = random.randint(0, 0o37)
+        self.mode2      = random.randint(0, 0o7777)
+        self.mode3a     = random.randint(0, 0o7777)
+        self.modes_addr = int(self.icao, 16) & 0xFFFFFF
+        self.xpdr1 = self.xpdr2 = self.xpdr3a = self.xpdrC = self.xpdrS = True
+
+    def has_xpdr(self, mode_code: int) -> bool:
+        """Does this aircraft reply to the given IFF protocol mode?"""
+        return getattr(self, self._MODE_FLAG.get(mode_code, ""), False)
 
     @property
     def lat(self):
@@ -178,27 +201,124 @@ class WaypointAircraft:
                     self._seg_t = 0.0
                     break
 
-    def next_msg(self):
-        seq = self._mi % 7
-        self._mi += 1
-        lat, lon, hdg = self.lat or 0.0, self.lon or 0.0, self.heading()
-        if seq == 0:
-            return build_identification(self.icao, self.callsign)
-        if seq in (1, 4):
-            return build_position(self.icao, lat, lon, self.alt_ft, False)
-        if seq in (2, 5):
-            return build_position(self.icao, lat, lon, self.alt_ft, True)
-        return build_velocity(self.icao, self.speed_kt, hdg, 0)
+
+# ── Interrogation link ──────────────────────────────────────────────────────────
+
+class InterrogationLink:
+    """Background thread: the aircraft side's only connection to the radar.
+
+    Listens for interrogation packets from iff_radar.py; for each one, tests
+    every local aircraft's own bearing/range against the beam geometry the
+    packet describes (the radar never tells us its ground truth — only its
+    antenna state), checks that aircraft's transponder capability for the
+    requested mode, and — for Mode S Selective — its own 24-bit address
+    against the requested one.  Aircraft that pass send back exactly the
+    field that mode carries; nothing else leaks onto the wire.
+    """
+
+    def __init__(self, sim, cfg):
+        self.sim = sim
+        self._cfg = cfg
+        self._recv_sock = None
+        self._send_sock = None
+        self._send_dst  = None
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+
+    def start(self):
+        try:
+            self._recv_sock = udp.open_recv(
+                self._cfg["ac_channel_int_host"], self._cfg["ac_channel_int_port"],
+                self._cfg["ac_channel_int_transport"], self._cfg["ac_channel_int_iface"])
+            self._recv_sock.settimeout(0.5)
+            self._send_sock, self._send_dst = udp.open_send(
+                self._cfg["ac_channel_rep_host"], self._cfg["ac_channel_rep_port"],
+                self._cfg["ac_channel_rep_transport"], self._cfg["ac_channel_rep_iface"])
+        except OSError as e:
+            print(f"[aircraft_sim] interrogation link failed: {e}")
+            return
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        for s in (self._recv_sock, self._send_sock):
+            if s is not None:
+                try:
+                    s.close()
+                except OSError:
+                    pass
+
+    def _loop(self):
+        while not self._stop.is_set():
+            try:
+                data, _addr = self._recv_sock.recvfrom(4096)
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            try:
+                interro = iff.unpack_interrogation(data)
+            except Exception:
+                continue
+            self._handle(interro)
+
+    def _handle(self, interro):
+        mode    = interro["mode"]
+        half_bw = interro["beam_bw_deg"] / 2.0
+        radar_lat, radar_lon = interro["radar_lat"], interro["radar_lon"]
+
+        with self.sim._lock:
+            snap = [(ac.icao, ac.callsign, ac.lat, ac.lon, ac.alt_ft,
+                     ac.modes_addr, ac.mode1, ac.mode2, ac.mode3a,
+                     ac.has_xpdr(mode))
+                    for ac in self.sim._aircraft]
+
+        for icao, call, lat, lon, alt_ft, msa, m1, m2, m3a, xpdr_ok in snap:
+            if lat is None or lon is None or not xpdr_ok:
+                continue
+            brg, _rng = iff.bearing_range_nm(radar_lat, radar_lon, lat, lon)
+            if abs(iff.angle_diff(brg, interro["beam_az_deg"])) > half_bw:
+                continue
+            if mode == iff.MODE_S_SEL:
+                sel = interro["selective_addr"]
+                if sel is None or msa != sel:
+                    continue
+
+            kw = {}
+            if mode == iff.MODE_1:
+                kw["mission_code"] = m1
+            elif mode == iff.MODE_2:
+                kw["unit_code"] = m2
+            elif mode == iff.MODE_3A:
+                kw["squawk"] = m3a
+            elif mode == iff.MODE_C:
+                kw["alt_ft"] = alt_ft
+            elif mode == iff.MODE_S_AC:
+                kw["modes_addr"] = msa
+            elif mode == iff.MODE_S_SEL:
+                kw["modes_addr"] = msa
+                kw["bds_reg"] = interro["bds_reg"]
+                if interro["bds_reg"] == iff.BDS_CALLSIGN:
+                    kw["callsign"] = call
+            else:
+                continue
+
+            icao_int = int(icao, 16)
+            pkt = iff.encode_target_reply(icao_int, mode, interro["prt_no"],
+                                          lat, lon, **kw)
+            try:
+                self._send_sock.sendto(pkt, self._send_dst)
+            except OSError:
+                pass
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
 class App(tk.Tk):
 
-    def __init__(self, group, port, iface, c_lat, c_lon, rng,
-                 declination=0.0, asx_host="127.0.0.1", asx_port=8600):
+    def __init__(self, c_lat, c_lon, rng, declination=0.0):
         super().__init__()
-        self.title("Path Emulator")
+        self.title("Aircraft Simulator")
         self.configure(bg=ui.PANEL)
         self.resizable(True, True)
         self.minsize(round(420 * ui.SCALE), round(360 * ui.SCALE))
@@ -211,26 +331,11 @@ class App(tk.Tk):
         self._cursor = None                     # (x, y, lat, lon) under pointer
         self._cursor_on = True                  # crosshair visibility (right-click toggles)
 
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-        self._sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)
-        self._sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
-        self._sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF,
-                              socket.inet_aton(iface))
-        self._group, self._port = group, port
-
-        # Unicast socket for ASTERIX CAT021 + the radar-position message.
-        self._asx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM,
-                                       socket.IPPROTO_UDP)
-        self._asx_dst  = (asx_host, asx_port)
-
         self._aircraft: list[WaypointAircraft] = []
         self._selected: WaypointAircraft | None = None
         self._drag_wp   = None
         self._draw_from = None      # last sampled pixel while freehand-drawing
         self._lock      = threading.Lock()
-        self._tx_count  = 0
-        self._asx_count = 0
-        self._tx_status = ""
         self._dirty     = True
         self._bg_sig    = None    # view signature the cached background was drawn for
         self._routes_dirty = True # rebuild route polylines on next frame
@@ -239,10 +344,32 @@ class App(tk.Tk):
         self._build_ui()
         self.bind("<F11>",    self._toggle_fullscreen)
         self.bind("<Escape>", self._exit_fullscreen)
-        threading.Thread(target=self._tx_loop,         daemon=True).start()
-        threading.Thread(target=self._asterix_loop,    daemon=True).start()
-        threading.Thread(target=self._radar_pos_burst, daemon=True).start()
+
+        # Wire the UDP endpoints using the shared network.cfg.  Failures here
+        # are non-fatal — the sim runs standalone if no radar is reachable.
+        self._netcfg = net_config.load()
+
+        # Interrogation link: answers interrogations received from iff_radar.py
+        # over UDP with per-target replies.  This is the ONLY channel through
+        # which the radar process learns anything about these aircraft.
+        self._interrogation_link = InterrogationLink(self, self._netcfg)
+        self._interrogation_link.start()
+
+        # ADS-B input: subscribe to the multicast feed and mirror decoded
+        # aircraft into our own aircraft list so they can also answer
+        # interrogations alongside hand-drawn targets.
+        self._adsb_source = adsb_source.AdsbSource(
+            self, self._netcfg["group"], self._netcfg["port"],
+            self._netcfg["iface"])
+        self._adsb_source.start()
+
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._loop()
+
+    def _on_close(self):
+        self._interrogation_link.stop()
+        self._adsb_source.stop()
+        self.destroy()
 
     # ── coordinate helpers ────────────────────────────────────────────────────
 
@@ -278,6 +405,10 @@ class App(tk.Tk):
         return b
 
     def _build_ui(self):
+        # Single panel: aircraft authoring.  Canvas fills the rest.
+        p = ui.make_panel(self, side=tk.LEFT)
+        self._panel = p
+
         self.cv = tk.Canvas(self, width=ui.CANVAS_SZ, height=ui.CANVAS_SZ,
                             bg=ui.BG, cursor="crosshair", highlightthickness=0)
         self.cv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -289,8 +420,6 @@ class App(tk.Tk):
         self.cv.bind("<Motion>",          self._hover)
         self.cv.bind("<Leave>",           lambda _: setattr(self, "_cursor", None))
         self.cv.bind("<Configure>",       self._on_resize)
-
-        p = ui.make_panel(self)
 
         tk.Frame(p, bg=ui.PANEL, height=round(10 * ui.SCALE)).pack()
         tk.Label(p, text="AIRCRAFT", bg=ui.PANEL, fg=ui.FG,
@@ -336,18 +465,52 @@ class App(tk.Tk):
                        activebackground=ui.PANEL,
                        command=self._toggle_loop).pack(side=tk.LEFT)
 
+        # ── IFF state ─────────────────────────────────────────────────────────
+        ui.sep(p)
+        tk.Label(p, text="IFF", bg=ui.PANEL, fg=ui.FG_DIM,
+                 font=ui.F_MD, anchor="w").pack(fill=tk.X, padx=ui.PAD)
+
+        # Mode 1 is a 5-bit mission code (octal, 2 digits); Mode 2 is a 12-bit
+        # unit code; Mode 3/A is the 12-bit civil squawk.  Both are 4-digit
+        # octal.  Mode S address is 24-bit hex.
+        self._v_m1   = tk.StringVar()
+        self._v_m2   = tk.StringVar()
+        self._v_m3a  = tk.StringVar()
+        self._v_msa  = tk.StringVar()
+        e_m1  = ui.entry_row(p, "M1 code",  self._v_m1)
+        e_m2  = ui.entry_row(p, "M2 code",  self._v_m2)
+        e_m3a = ui.entry_row(p, "M3A sqwk", self._v_m3a)
+        e_msa = ui.entry_row(p, "MS addr",  self._v_msa)
+        for e in (e_m1, e_m2, e_m3a, e_msa):
+            e.bind("<Return>",   self._apply_iff)
+            e.bind("<FocusOut>", self._apply_iff)
+
+        # Capability flags — five checkboxes in a 2-row grid
+        self._v_x1  = tk.BooleanVar(value=True)
+        self._v_x2  = tk.BooleanVar(value=True)
+        self._v_x3a = tk.BooleanVar(value=True)
+        self._v_xc  = tk.BooleanVar(value=True)
+        self._v_xs  = tk.BooleanVar(value=True)
+        cf = tk.Frame(p, bg=ui.PANEL)
+        cf.pack(fill=tk.X, padx=ui.PAD, pady=ui.PAD2)
+        def _cap(label, var, col, row):
+            tk.Checkbutton(cf, text=label, variable=var,
+                           bg=ui.PANEL, fg=ui.FG, selectcolor=ui.ENTRY,
+                           activebackground=ui.PANEL, font=ui.F_SM,
+                           command=self._apply_caps
+                           ).grid(row=row, column=col, sticky="w", padx=2)
+        _cap("M1",  self._v_x1,  0, 0)
+        _cap("M2",  self._v_x2,  1, 0)
+        _cap("M3A", self._v_x3a, 2, 0)
+        _cap("MC",  self._v_xc,  0, 1)
+        _cap("MS",  self._v_xs,  1, 1)
+
         ui.flat_button(p, "Delete track", self._del_ac, fg="#888888"
                        ).pack(fill=tk.X, padx=ui.PAD, pady=(ui.PAD, ui.PAD2))
 
         ui.flat_button(p, "Reset positions", self._reset_positions,
                        bg=ui.BTN_RED, fg="#ffffff", active=ui.BTN_RED_A
                        ).pack(fill=tk.X, padx=ui.PAD, pady=(0, ui.PAD))
-
-        ui.sep(p)
-        self._v_status = tk.StringVar(value="—")
-        tk.Label(p, textvariable=self._v_status, bg=ui.PANEL, fg=ui.FG_DIM,
-                 font=ui.F_SM, justify=tk.LEFT, anchor="w"
-                 ).pack(fill=tk.X, padx=ui.PAD)
 
         tk.Frame(p, bg=ui.PANEL).pack(fill=tk.Y, expand=True)
         ui.sep(p)
@@ -475,6 +638,17 @@ class App(tk.Tk):
         self._v_alt.set(ac.alt_ft)
         self._v_spd.set(int(ac.speed_kt))
         self._v_loop.set(ac.loop)
+        # IFF fields.  Mode 1 is 5-bit (2-digit octal); Mode 2 / 3-A are
+        # 12-bit (4-digit octal).
+        self._v_m1.set(f"{ac.mode1:02o}")
+        self._v_m2.set(f"{ac.mode2:04o}")
+        self._v_m3a.set(f"{ac.mode3a:04o}")
+        self._v_msa.set(f"{ac.modes_addr:06X}")
+        self._v_x1.set(ac.xpdr1)
+        self._v_x2.set(ac.xpdr2)
+        self._v_x3a.set(ac.xpdr3a)
+        self._v_xc.set(ac.xpdrC)
+        self._v_xs.set(ac.xpdrS)
         idx = next((i for i, a in enumerate(self._aircraft) if a is ac), None)
         if idx is not None:
             self._lb.selection_clear(0, tk.END)
@@ -531,6 +705,46 @@ class App(tk.Tk):
         self._v_name.set(f"{ac.icao}  {ac.callsign}")
         self._dirty = True
 
+    def _apply_iff(self, _ev=None):
+        """Apply edited IFF codes (octal squawks + Mode S hex addr)."""
+        ac = self._selected
+        if not ac:
+            return
+        def parse_oct(s, fallback, max_val):
+            try:
+                v = int(s.strip(), 8)
+                return v if 0 <= v <= max_val else fallback
+            except ValueError:
+                return fallback
+        def parse_hex(s, fallback):
+            try:
+                v = int(s.strip(), 16)
+                return v if 0 <= v <= 0xFFFFFF else fallback
+            except ValueError:
+                return fallback
+        with self._lock:
+            ac.mode1      = parse_oct(self._v_m1.get(),  ac.mode1,  0o37)
+            ac.mode2      = parse_oct(self._v_m2.get(),  ac.mode2,  0o7777)
+            ac.mode3a     = parse_oct(self._v_m3a.get(), ac.mode3a, 0o7777)
+            ac.modes_addr = parse_hex(self._v_msa.get(), ac.modes_addr)
+        # Reflect normalised values back into the fields.
+        self._v_m1.set(f"{ac.mode1:02o}")
+        self._v_m2.set(f"{ac.mode2:04o}")
+        self._v_m3a.set(f"{ac.mode3a:04o}")
+        self._v_msa.set(f"{ac.modes_addr:06X}")
+
+    def _apply_caps(self):
+        """Apply edited transponder capability flags."""
+        ac = self._selected
+        if not ac:
+            return
+        with self._lock:
+            ac.xpdr1  = self._v_x1.get()
+            ac.xpdr2  = self._v_x2.get()
+            ac.xpdr3a = self._v_x3a.get()
+            ac.xpdrC  = self._v_xc.get()
+            ac.xpdrS  = self._v_xs.get()
+
     def _del_ac(self):
         if not self._selected:
             return
@@ -565,8 +779,6 @@ class App(tk.Tk):
 
         self._refresh_list()
         self._draw()
-        if self._tx_status:
-            self._v_status.set(self._tx_status)
         self.after(50, self._loop)
 
     def _view_sig(self):
@@ -690,63 +902,6 @@ class App(tk.Tk):
                        text=f"FL{ac.alt_ft//100:03d}  {self._mag(hdg):03.0f}°M",
                        fill=ui.DIM, font=ui.sfont(ui.PT_SM, sf), anchor="w", tags="fg")
 
-    # ── TX thread ─────────────────────────────────────────────────────────────
-
-    def _tx_loop(self):
-        while True:
-            with self._lock:
-                acs = list(self._aircraft)
-            if not acs:
-                time.sleep(0.1)
-                continue
-            for ac in acs:
-                try:
-                    raw = ac.next_msg()
-                    self._sock.sendto(f"*{raw};\n".encode(),
-                                      (self._group, self._port))
-                    self._tx_count += 1
-                except OSError:
-                    pass
-                time.sleep(0.08)
-            self._tx_status = (
-                f"ADS-B {self._group}:{self._port}  {self._tx_count} msg\n"
-                f"CAT21 {self._asx_dst[0]}:{self._asx_dst[1]}  {self._asx_count} blk")
-
-    # ── ASTERIX CAT021 output ─────────────────────────────────────────────────
-
-    def _asterix_loop(self):
-        """Emit a CAT021 data block (one record per active target) ~1/s."""
-        while True:
-            time.sleep(1.0)
-            with self._lock:
-                snap = [(ac.track_no, ac.icao, ac.callsign, ac.lat, ac.lon,
-                         ac.alt_ft, ac.speed_kt, ac.heading())
-                        for ac in self._aircraft if ac.lat is not None]
-            records = [
-                cat21.target_record(
-                    sac=0, sic=1, track=track_no, icao=icao, callsign=call,
-                    lat=lat, lon=lon, alt_ft=alt, speed_kt=spd,
-                    track_deg=hdg, mag_hdg_deg=self._mag(hdg))
-                for track_no, icao, call, lat, lon, alt, spd, hdg in snap
-            ]
-            if not records:
-                continue
-            try:
-                self._asx_sock.sendto(cat21.build_message(records), self._asx_dst)
-                self._asx_count += 1
-            except OSError:
-                pass
-
-    def _radar_pos_burst(self):
-        """Announce the radar's own position at startup."""
-        pkt = struct.pack("<HHff", 12, _RADAR_POS_MSG_ID, self.c_lat, self.c_lon)
-        for _ in range(8):                       # 8 × 500 ms = 4 s
-            try:
-                self._asx_sock.sendto(pkt, self._asx_dst)
-            except OSError:
-                pass
-            time.sleep(0.5)
-
     # ── fullscreen ────────────────────────────────────────────────────────────
 
     def _toggle_fullscreen(self, _ev=None):
@@ -761,29 +916,18 @@ class App(tk.Tk):
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
-    cfg = net_config.load()
-    p   = argparse.ArgumentParser(description="ADS-B Path Emulator",
-                                  formatter_class=argparse.RawDescriptionHelpFormatter,
-                                  epilog=__doc__)
-    p.add_argument("--group",  default=cfg["group"])
-    p.add_argument("--port",   type=int, default=cfg["port"])
-    p.add_argument("--iface",  default=cfg["iface"])
+    p = argparse.ArgumentParser(description="Aircraft simulator (IFF sim pair)",
+                                formatter_class=argparse.RawDescriptionHelpFormatter,
+                                epilog=__doc__)
     p.add_argument("--centre", metavar="LAT,LON", default=None)
     p.add_argument("--range",  type=float, default=200.0)
     p.add_argument("--declination", type=float, default=0.0,
                    help="Magnetic declination °E for true→magnetic heading (default: 0)")
-    p.add_argument("--asterix-host", default=cfg["asterix_host"],
-                   help=f"Unicast IP for CAT021 + radar-position output "
-                        f"(default: {cfg['asterix_host']})")
-    p.add_argument("--asterix-port", type=int, default=cfg["asterix_port"],
-                   help=f"Unicast port for CAT021 + radar-position output "
-                        f"(default: {cfg['asterix_port']})")
     args = p.parse_args()
     lat, lon = 51.477, -0.461
     if args.centre:
         lat, lon = map(float, args.centre.split(","))
-    App(args.group, args.port, args.iface, lat, lon, args.range,
-        args.declination, args.asterix_host, args.asterix_port).mainloop()
+    App(lat, lon, args.range, args.declination).mainloop()
 
 
 if __name__ == "__main__":

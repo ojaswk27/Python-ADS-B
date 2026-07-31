@@ -5,9 +5,14 @@ Reads network.cfg (KEY = VALUE, # comments) from the same directory as this
 file.  Returns a dict covering: ADS-B multicast ('group'/'port'/'iface'),
 ASTERIX CAT021 output ('asterix_host'/'asterix_port'), the external IFF
 interrogation-input and reply-output channels ('iff_interrogation_*',
-'iff_reply_*'), and the private aircraft_sim.py <-> iff_radar.py link
-('ac_channel_int_*', 'ac_channel_rep_*').  Missing or unreadable config files
-are silently ignored — callers fall back to their own hard-coded defaults.
+'iff_reply_*'), and the private legacy/aircraft_sim.py <-> legacy/iff_radar.py
+link ('ac_channel_int_*', 'ac_channel_rep_*').  Missing or unreadable config
+files are silently ignored — callers fall back to their own hard-coded defaults.
+
+simulator.py has no network of its own; it reaches this module only indirectly,
+through adsb_decoder and aircraft_emulator, and ignores every value here.  The
+remaining consumers are adsb_decoder --multicast, aircraft_emulator run
+standalone, and the superseded tools in legacy/.
 """
 
 import os

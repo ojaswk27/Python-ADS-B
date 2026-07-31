@@ -3,7 +3,6 @@
 ADS-B decoder (pure standard library).
 
 Usage
------
     python adsb_decoder.py                     # decode built-in demo messages
     python adsb_decoder.py --msg <HEX>         # decode a single message
     python adsb_decoder.py --file msgs.txt     # decode newline-separated file
@@ -24,9 +23,7 @@ import net_config
 from pyModeS.message import crc_remainder as _crc_remainder  # table-driven CRC-24
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # Section 1 — Low-level bit utilities
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def get_bits(msg: str, start: int, end: int) -> int:
     """
@@ -52,9 +49,7 @@ def me_payload(msg: str) -> int:
     return get_bits(msg, 33, 88)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # Section 2 — CRC-24 (Mode S)
-# ═══════════════════════════════════════════════════════════════════════════════
 #
 # pyModeS ships a table-driven CRC-24 implementation (~4.5x faster than a
 # hand-rolled shift register).  crc_remainder(n, bits) returns 0 for a valid
@@ -66,9 +61,7 @@ def crc_valid(msg: str) -> bool:
     return _crc_remainder(int(msg, 16), 112) == 0
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # Section 3 — Frame header parsing
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def parse_header(msg: str) -> tuple:
     """
@@ -96,9 +89,7 @@ def tc_label(tc: int) -> str:
     return f"Reserved (TC{tc})"
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # Section 4 — Aircraft Identification
-# ═══════════════════════════════════════════════════════════════════════════════
 
 # 64-character ACS charset: 6-bit index → ASCII character.
 _CHARSET = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ#####_###############0123456789######"
@@ -135,9 +126,7 @@ def decode_identification(msg: str) -> dict:
     }
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # Section 5 — Altitude decoding
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def _gray2int(n: int) -> int:
     """Convert a Gillham (reflected Gray) code to a plain binary integer."""
@@ -210,9 +199,7 @@ def decode_altitude(msg: str) -> Optional[int]:
     return None
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # Section 6 — Position decoding
-# ═══════════════════════════════════════════════════════════════════════════════
 
 _NZ = 15
 
@@ -250,7 +237,6 @@ def cpr_resolve(
     Decode airborne position from a CPR even/odd pair.
 
     How it works
-    ------------
     Each frame encodes the fractional offset within a latitude zone grid,
     but not which zone.  Two grids with coprime sizes (60 and 59) share only
     one consistent zone index j across all global latitudes — the Chinese
@@ -264,11 +250,9 @@ def cpr_resolve(
     The same approach resolves longitude using NL(lat)-based zone counts.
 
     Parameters
-    ----------
     use_odd : if True, report the position of the odd frame (default: even).
 
     Returns
-    -------
     (latitude°, longitude°) or None if frames straddle a zone boundary.
     """
     lat_e = cpr_lat_even / 131072.0
@@ -300,9 +284,7 @@ def cpr_resolve(
     return lat, lon
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # Section 7 — Airborne Velocity (TC 19)
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def decode_velocity(msg: str) -> dict:
     """Decode an Airborne Velocity message (TC 19)."""
@@ -364,9 +346,7 @@ def decode_velocity(msg: str) -> dict:
     return result
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # Section 8 — Aircraft state tracker
-# ═══════════════════════════════════════════════════════════════════════════════
 
 class Aircraft:
     """
@@ -447,9 +427,7 @@ class Aircraft:
         return "  │  ".join(parts)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # Section 9 — Top-level message decoder
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def decode_message(raw: str, fleet: dict) -> dict:
     """
@@ -493,7 +471,7 @@ def decode_message(raw: str, fleet: dict) -> dict:
     ac.last_seen = datetime.now(timezone.utc)
     result["valid"] = True
 
-    # ── TC 1–4 : Aircraft Identification ────────────────────────────────────
+    # TC 1–4 : Aircraft Identification
     if 1 <= tc <= 4:
         ident       = decode_identification(raw)
         ac.callsign = ident["callsign"]
@@ -505,7 +483,7 @@ def decode_message(raw: str, fleet: dict) -> dict:
             f"Callsign: {ac.callsign}  Wake: {ac.wake}"
         )
 
-    # ── TC 9–18, 20–22 : Airborne Position ──────────────────────────────────
+    # TC 9–18, 20–22 : Airborne Position
     elif (9 <= tc <= 18) or (20 <= tc <= 22):
         fmt, cpr_lat, cpr_lon = decode_cpr_fields(raw)
         alt = decode_altitude(raw)
@@ -520,7 +498,7 @@ def decode_message(raw: str, fleet: dict) -> dict:
             f"CPR-{'even' if fmt == 0 else 'odd'}  Pos: {pos}"
         )
 
-    # ── TC 19 : Airborne Velocity ────────────────────────────────────────────
+    # TC 19 : Airborne Velocity
     elif tc == 19:
         vel           = decode_velocity(raw)
         ac.speed      = vel.get("speed")
@@ -542,7 +520,7 @@ def decode_message(raw: str, fleet: dict) -> dict:
             f"V/S: {arrow}{abs(vr):,} fpm [{ac.vr_source}]"
         )
 
-    # ── TC 28/31 : Status / Operational ─────────────────────────────────────
+    # TC 28/31 : Status / Operational
     elif tc in (28, 31):
         result["summary"] = f"[{'STAT' if tc==28 else 'OPS'}]    {icao}  {tc_label(tc)}"
 
@@ -552,9 +530,7 @@ def decode_message(raw: str, fleet: dict) -> dict:
     return result
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # Section 10 — CLI / I/O helpers
-# ═══════════════════════════════════════════════════════════════════════════════
 
 _BANNER = (
     "\n╔══════════════════════════════════════════════════════════════════╗\n"
@@ -704,9 +680,7 @@ def run_multicast(group: str, port: int, iface: str, fleet: dict) -> None:
         sock.close()
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # Section 11 — Entry point
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def main() -> None:
     _cfg = net_config.load()

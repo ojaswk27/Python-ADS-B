@@ -1,6 +1,6 @@
 """
 Propagation channel between an aircraft and the radar site
-=========================================================
+
 The one place allowed to read aircraft ground truth on the receive path, and
 only for geometry: slant range and line-of-sight.  Everything the display
 eventually shows has to arrive as an encoded frame that survives this module.
@@ -23,7 +23,7 @@ from dataclasses import dataclass
 import iff_protocol as iff
 
 
-# ── Site / channel configuration ──────────────────────────────────────────────
+# Site / channel configuration
 
 @dataclass
 class RadarSite:
@@ -80,7 +80,7 @@ def visible(ac, site, max_range_nm):
     return rng, True
 
 
-# ── IFF ───────────────────────────────────────────────────────────────────────
+# IFF
 
 def deliver_iff(ac, site, mode, t_tx, prt_no, rng_nm=None,
                 qnh_hpa=iff.STD_QNH_HPA):
@@ -170,7 +170,7 @@ def measure_bearing(beam_az_deg, site, true_brg_deg=None):
     return (base + random.gauss(0.0, sigma)) % 360.0
 
 
-# ── ADS-B ─────────────────────────────────────────────────────────────────────
+# ADS-B
 
 def deliver_adsb(ac, site, frame, t):
     """Carry one ADS-B squitter to the site.  Returns the frame or None.

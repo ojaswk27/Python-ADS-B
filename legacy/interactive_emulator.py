@@ -28,6 +28,13 @@ import threading
 import time
 import tkinter as tk
 
+# Superseded by simulator.py and moved into legacy/.  The shared modules this
+# program still uses (radar_ui, net_config, adsb_decoder, ...) stayed at the
+# repo root, so put the root on the path before importing them.
+import os as _os
+import sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+
 from aircraft_emulator import build_identification, build_position, build_velocity
 import net_config
 

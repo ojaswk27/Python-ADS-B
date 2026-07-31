@@ -14,6 +14,13 @@ import socket
 import threading
 import time
 
+# Superseded by simulator.py and moved into legacy/.  The shared modules this
+# program still uses (radar_ui, net_config, adsb_decoder, ...) stayed at the
+# repo root, so put the root on the path before importing them.
+import os as _os
+import sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+
 import adsb_decoder
 import radar_ui as ui
 import udp_endpoints as udp

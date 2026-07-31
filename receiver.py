@@ -1,6 +1,6 @@
 """
 Receiver — the only thing allowed to build the display picture
-=============================================================
+
 Owns the track store.  Every field in it arrives by decoding a frame that came
 through channel.py; nothing here may read aircraft ground truth.
 
@@ -98,7 +98,7 @@ class Receiver:
         # format — a standard ADS-B frame while in custom mode, or vice versa.
         self.undecodable = 0
 
-    # ── store ────────────────────────────────────────────────────────────────
+    # store
 
     def track_for(self, addr):
         trk = self.tracks.get(addr)
@@ -148,7 +148,7 @@ class Receiver:
         self.known_addrs[addr] = how
         return True
 
-    # ── IFF receive path ─────────────────────────────────────────────────────
+    # IFF receive path
 
     def rx_iff(self, frame, t_tx, t_rx, beam_az_deg):
         """Decode one IFF reply and update its track.
@@ -196,7 +196,7 @@ class Receiver:
         self.dirty = True
         return trk
 
-    # ── ADS-B receive path ───────────────────────────────────────────────────
+    # ADS-B receive path
 
     def rx_adsb(self, frame, t):
         """Decode one ADS-B frame and update its track.  Returns the track, or
@@ -235,7 +235,7 @@ class Receiver:
         self.dirty = True
         return trk
 
-    # ── Custom 1090 receive path ─────────────────────────────────────────────
+    # Custom 1090 receive path
 
     # Field *names* in the config are the user's choice, so they cannot be used
     # to work out what a value means.  The declared *source* can: a field fed

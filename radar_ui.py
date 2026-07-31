@@ -11,11 +11,11 @@ import math
 import random
 import tkinter as tk
 
-# ── Scale ─────────────────────────────────────────────────────────────────────
+# Scale
 
 SCALE = 1  # change this one number to resize everything
 
-# ── Palette ───────────────────────────────────────────────────────────────────
+# Palette
 
 BG = "#000000"
 RADAR = "#050505"
@@ -33,7 +33,7 @@ BTN_RED = "#8a2020"  # destructive-action button
 BTN_RED_A = "#a83030"  # …and its active/hover state
 GRID = "#161616"  # lat/lon graticule lines
 
-# ── Scale-derived sizes ───────────────────────────────────────────────────────
+# Scale-derived sizes
 
 CANVAS_SZ = 680 * SCALE  # canvas width/height in pixels
 PANEL_W = 200 * SCALE  # side-panel width in pixels
@@ -48,7 +48,7 @@ LBL_DY = 12 * SCALE  # blip label y offset from centre
 PAD = round(8 * SCALE)  # standard panel margin
 PAD2 = round(4 * SCALE)  # half margin
 
-# ── Fonts ─────────────────────────────────────────────────────────────────────
+# Fonts
 # Edit these four lines to change all text sizes at once.
 
 F_SM = ("Courier", round(7 * SCALE))  # range labels, hints, status
@@ -63,7 +63,7 @@ PT_SM = round(7 * SCALE)
 PT_MD = round(8 * SCALE)
 
 
-# ── Dynamic scaling ───────────────────────────────────────────────────────────
+# Dynamic scaling
 
 
 def scale_for(w=None, h=None):
@@ -100,7 +100,7 @@ def sfont(base_pt, sf=1.0, bold=False):
     return f
 
 
-# ── Geometry ──────────────────────────────────────────────────────────────────
+# Geometry
 
 
 def geom(w=None, h=None):
@@ -139,7 +139,7 @@ def xy_to_ll(x, y, cx, cy, r, c_lat, c_lon, rng):
     return (c_lat + nm_n / 60.0, c_lon + nm_e / (60.0 * math.cos(math.radians(c_lat))))
 
 
-# ── Colour ────────────────────────────────────────────────────────────────────
+# Colour
 
 # Successive hues advance by the golden-ratio conjugate — a low-discrepancy
 # sequence that spreads colours around the wheel so two targets never land on
@@ -179,7 +179,7 @@ def blend(hex_a, hex_b, t):
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
-# ── Widget helpers ────────────────────────────────────────────────────────────
+# Widget helpers
 
 
 def sep(parent):
@@ -354,7 +354,7 @@ def make_scroll_panel(root, side=tk.LEFT, width=None):
     return inner
 
 
-# ── Radar canvas drawing ──────────────────────────────────────────────────────
+# Radar canvas drawing
 
 
 def draw_radar_frame(cv, cx, cy, r, rng, c_lat, c_lon, sf=1.0, tag=""):

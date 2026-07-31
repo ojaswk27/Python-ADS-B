@@ -19,7 +19,7 @@ chk = suite.chk
 
 src = source("simulator.py")
 
-# ── 4.2 aircraft emit bytes only ─────────────────────────────────────────────
+# 4.2 aircraft emit bytes only
 ac = S.SimAircraft()
 ac.waypoints = [(51.6, -0.4), (51.7, -0.3)]
 ac.step(1.0)
@@ -48,7 +48,7 @@ for leak in ("ac.lat", "ac.lon", "ac.callsign", "ac.alt_ft"):
     ok = leak not in draw.split("if self._truth_on:")[0]
     chk(f"4.5 plot layer does not read {leak}", ok)
 
-# ── 4.3 channel ──────────────────────────────────────────────────────────────
+# 4.3 channel
 site = channel.RadarSite(lat=51.477, lon=-0.461)
 chk("4.3 radio horizon grows with altitude",
     channel.radio_horizon_nm(100, 35000) > channel.radio_horizon_nm(100, 1000))
@@ -100,7 +100,7 @@ if out_s:
         abs(rtt_s - (100 * iff.RADAR_MILE_US + iff.TURNAROUND_S_US)) < 1e-6,
         f"{rtt_s:.3f} us")
 
-# ── 4.4 receiver ─────────────────────────────────────────────────────────────
+# 4.4 receiver
 rx = receiver.Receiver(site)
 trk = rx.rx_iff(frame, t_tx, t_rx, 33.0)
 chk("4.4 rx_iff creates a track", trk is not None)
@@ -149,7 +149,7 @@ rx3.rx_adsb(build_position(icao, lat0, lon0, 35000, True), 20.0)   # > 10 s apar
 chk("4.4 an even/odd pair more than 10 s apart does not resolve",
     rx3.tracks[int(icao, 16)]["adsb"].get("lat") is None)
 
-# ── 4.5 plots come from the track store ──────────────────────────────────────
+# 4.5 plots come from the track store
 clock = Clock(dt=0.05)
 clock.install()
 try:
@@ -206,7 +206,7 @@ try:
     chk("4.5 IFF plot updates are ~one scan apart, not per frame",
         len(big) >= 2 and min(big) > 1.0,
         f"gaps {gaps[:6]} (scan={scan_s:.0f}s)")
-    # ── 4.4 monopulse: azimuth is measured, not the beam pointing angle ──────
+    # 4.4 monopulse: azimuth is measured, not the beam pointing angle
     # Reporting the beam angle leaves an error up to half a beamwidth (1.5 deg
     # at the default 3 deg beam), which is ~300 m of cross-range at 25 nm and
     # shifts the IFF plot away from the ADS-B position.  Monopulse estimates the
@@ -251,7 +251,7 @@ try:
         _st.pstdev(errs2) > sd * 1.5,
         f"sd {_st.pstdev(errs2):.3f} vs monopulse {sd:.3f}")
 
-    # ── 4.5 the plot must not alternate between sources ──────────────────────
+    # 4.5 the plot must not alternate between sources
     # Picking whichever source was freshest made the blip jump to the IFF plot
     # once per scan and straight back, because a reported position is good to
     # metres and a measured plot to hundreds of them.  Detect it as a step that
@@ -286,7 +286,7 @@ try:
     chk("4.5 ...but the measured plot is still used before CPR resolves",
         srcs.get("iff", 0) > 0, str(srcs))
 
-    # ── radar site can be moved and resized at runtime ───────────────────────
+    # radar site can be moved and resized at runtime
     appS = make_app(clock)
     chk("site fields populate from the live radar",
         appS._v_clat.get().startswith("51.477"), appS._v_clat.get())

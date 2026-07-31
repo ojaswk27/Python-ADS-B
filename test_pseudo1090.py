@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Custom 1090 format — codec and config validation tests
-======================================================
+
 No display needed.
 
     python test_pseudo1090.py
@@ -52,7 +52,7 @@ class AC:
         return self._hdg
 
 
-# ══ encodings ═════════════════════════════════════════════════════════════════
+# encodings
 
 def test_encodings():
     print("\nencodings round-trip within their declared resolution")
@@ -120,7 +120,7 @@ def test_encodings():
     chk("None encodes as zero", f.decode(f.encode(None)) == 0)
 
 
-# ══ frame level ═══════════════════════════════════════════════════════════════
+# frame level
 
 _GOOD = """
 [format]
@@ -209,7 +209,7 @@ alt_ft = 0 11 uint:25 ac.alt_ft
         solo.address_of("only", solo.decode(solo.encode("only", ac))[1]) is None)
 
 
-# ══ config validation ═════════════════════════════════════════════════════════
+# config validation
 
 def test_validation():
     print("\nconfig errors name the section and field, and all appear at once")

@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
 ADS-B Aircraft Emulator
-=======================
+
 Simulates aircraft transmitting ADS-B messages over UDP multicast (port 30003).
 Messages use the raw hex framing that dump1090 emits (*HEXMSG;\\n).
 
 Usage
------
     python aircraft_emulator.py                       # 3 aircraft → 239.255.0.1:30003
     python aircraft_emulator.py --count 2             # fewer aircraft
     python aircraft_emulator.py --port 30003          # explicit port
@@ -25,7 +24,7 @@ from pyModeS.message import crc_remainder as _crc_remainder
 import net_config
 
 
-# ─── CPR helpers ─────────────────────────────────────────────────────────────
+# CPR helpers
 
 _NZ = 15
 
@@ -68,7 +67,7 @@ def _encode_cpr(lat: float, lon: float, odd: bool) -> tuple:
     return cpr_lat, cpr_lon
 
 
-# ─── Altitude encoding (Q=1, 25-ft linear) ────────────────────────────────────
+# Altitude encoding (Q=1, 25-ft linear)
 
 def _encode_altitude(alt_ft: int) -> int:
     """
@@ -85,7 +84,7 @@ def _encode_altitude(alt_ft: int) -> int:
     return ((altcode >> 7) << 6) | (altcode & 0x3F)
 
 
-# ─── Callsign encoding (ACS 6-bit charset) ────────────────────────────────────
+# Callsign encoding (ACS 6-bit charset)
 
 _CHARSET = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ#####_###############0123456789######"
 
@@ -95,7 +94,7 @@ def _char_idx(c: str) -> int:
     return i if i >= 0 else 0
 
 
-# ─── Message builders ─────────────────────────────────────────────────────────
+# Message builders
 
 def _sign_crc(payload_hex: str) -> str:
     """Given an 11-byte (22-char) hex payload, return the full 14-byte message."""
@@ -175,7 +174,7 @@ def build_velocity(icao: str, speed_kt: float, heading_deg: float,
     return _sign_crc(f"{header:022X}")
 
 
-# ─── Frame decoder (inverse of the builders above) ────────────────────────────
+# Frame decoder (inverse of the builders above)
 #
 # Delegates the bit-picking to adsb_decoder, which already implements the
 # DO-260B field layouts, Gillham/Q-bit altitude, and CPR arithmetic.  This
@@ -243,7 +242,7 @@ def decode_frame(raw) -> dict:
     raise ValueError(f"unsupported type code TC={tc} ({dec.tc_label(tc)})")
 
 
-# ─── Simulated aircraft state ─────────────────────────────────────────────────
+# Simulated aircraft state
 
 @dataclass
 class SimAircraft:
@@ -291,7 +290,7 @@ class SimAircraft:
                                           self.heading_deg, self.vrate_fpm)
 
 
-# ─── Default fleet ────────────────────────────────────────────────────────────
+# Default fleet
 
 _ALL_AIRCRAFT = [
     SimAircraft(
@@ -318,7 +317,7 @@ _ALL_AIRCRAFT = [
 ]
 
 
-# ─── Emitter loop ─────────────────────────────────────────────────────────────
+# Emitter loop
 
 def run_emulator(aircraft: list, group: str, port: int,
                  iface: str, rate: float) -> None:
@@ -366,7 +365,7 @@ def run_emulator(aircraft: list, group: str, port: int,
         sock.close()
 
 
-# ─── Entry point ─────────────────────────────────────────────────────────────
+# Entry point
 
 def main() -> None:
     _cfg = net_config.load()

@@ -24,7 +24,7 @@ def count_interrogations(app, clock, n_frames):
 clock = Clock(dt=0.05)
 clock.install()
 try:
-    # ── 3.1 PRT is not clamped to the frame rate ─────────────────────────────
+    # 3.1 PRT is not clamped to the frame rate
     app = make_app(clock)
     add_ac(app, [(51.6, -0.4), (51.7, -0.3)], speed_kt=300)
     app._v_prt.set(5000)                 # 5000 us -> 200 Hz
@@ -64,7 +64,7 @@ try:
     chk("3.1 per-frame PRT count is capped", len(calls) <= S._MAX_PRT_PER_FRAME,
         f"{len(calls)} <= {S._MAX_PRT_PER_FRAME}")
 
-    # ── 3.2 hits-per-dwell readout ───────────────────────────────────────────
+    # 3.2 hits-per-dwell readout
     app2 = make_app(clock)
     app2._v_rpm.set(15); app2._v_bw.set(3.0); app2._v_prt.set(30000)
     frames(app2, clock, 2, draw=False)
@@ -95,7 +95,7 @@ try:
     chk("3.2 beam test uses half the beam width unmodified",
         "abs(iff.angle_diff(brg, az)) > half_bw" in body)
 
-    # ── 3.3 Mode S all-call lockout ──────────────────────────────────────────
+    # 3.3 Mode S all-call lockout
     app3 = make_app(clock)
     ac = add_ac(app3, [(51.6, -0.4), (51.7, -0.3)], speed_kt=0)
     app3._v_mode.set("Mode S All-Call")
@@ -111,7 +111,7 @@ try:
         f"{len(replies)} replies by 35 s")
     app3.rx.rx_iff = orig
 
-    # ── 3.3 selective roll-call: one reply per target per scan ───────────────
+    # 3.3 selective roll-call: one reply per target per scan
     app4 = make_app(clock)
     ac4 = add_ac(app4, [(51.6, -0.4), (51.7, -0.3)], speed_kt=0)
     # seed the address list so a target can be selected
@@ -132,7 +132,7 @@ try:
         f"{len(replies)} replies")
     app4.rx.rx_iff = orig4
 
-    # ── 3.3 selective with no target is called out in the panel ──────────────
+    # 3.3 selective with no target is called out in the panel
     # No aircraft at all, so nothing seeds the address list from either source
     # — this is precisely when selective mode would fall back to addr 0 and go
     # silently dead.  (With any aircraft present, ADS-B seeds the menu and the
